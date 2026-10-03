@@ -159,12 +159,22 @@ test "filter install exact rules, duplicate no-op, delete, cleanup" {
     const route_dst = model.Network{ .prefix = try model.Prefix.parse("10.1.0.0/24") };
     _ = try filter.addFilterRule(&m, &route_src, route_dst, .tcp, null, null, .accept);
 
+    // Range and listed ports install (multiport plural form for 1.4.21).
+    const range_src = [_]model.Prefix{try model.Prefix.parse("10.0.0.5/32")};
+    const range = model.Port{ .is_range = true, .values = &.{ 8000, 8010 } };
+    const range_id = try filter.addFilterRule(&m, &range_src, .none, .tcp, null, range, .accept);
+    const list_src = [_]model.Prefix{try model.Prefix.parse("10.0.0.6/32")};
+    const list = model.Port{ .is_range = false, .values = &.{ 80, 443 } };
+    const list_id = try filter.addFilterRule(&m, &list_src, .none, .tcp, null, list, .accept);
+
     const acl = try runList(alloc, "filter", chains.acl_input);
     defer alloc.free(acl);
     try std.testing.expectEqualStrings(
         \\-N NETBIRD-ACL-INPUT
         \\-A NETBIRD-ACL-INPUT -s 10.0.0.9/32 -p udp -j DROP
         \\-A NETBIRD-ACL-INPUT -s 10.0.0.1/32 -p tcp -m tcp --dport 443 -j ACCEPT
+        \\-A NETBIRD-ACL-INPUT -s 10.0.0.5/32 -p tcp -m tcp --dport 8000:8010 -j ACCEPT
+        \\-A NETBIRD-ACL-INPUT -s 10.0.0.6/32 -p tcp -m multiport --dports 80,443 -j ACCEPT
         \\
     , acl);
 
@@ -183,6 +193,8 @@ test "filter install exact rules, duplicate no-op, delete, cleanup" {
         \\-N NETBIRD-RT-PRE
         \\-A NETBIRD-RT-PRE -s 10.0.0.1/32 -i wt0 -p tcp -m tcp --dport 443 -m addrtype --dst-type LOCAL -j MARK --set-xmark 0x1bd20/0xffffffff
         \\-A NETBIRD-RT-PRE -s 10.0.0.9/32 -i wt0 -p udp -m addrtype --dst-type LOCAL -j MARK --set-xmark 0x1bd20/0xffffffff
+        \\-A NETBIRD-RT-PRE -s 10.0.0.5/32 -i wt0 -p tcp -m tcp --dport 8000:8010 -m addrtype --dst-type LOCAL -j MARK --set-xmark 0x1bd20/0xffffffff
+        \\-A NETBIRD-RT-PRE -s 10.0.0.6/32 -i wt0 -p tcp -m multiport --dports 80,443 -m addrtype --dst-type LOCAL -j MARK --set-xmark 0x1bd20/0xffffffff
         \\
     , pre);
 
@@ -200,6 +212,8 @@ test "filter install exact rules, duplicate no-op, delete, cleanup" {
     try std.testing.expectEqualStrings(
         \\-N NETBIRD-ACL-INPUT
         \\-A NETBIRD-ACL-INPUT -s 10.0.0.9/32 -p udp -j DROP
+        \\-A NETBIRD-ACL-INPUT -s 10.0.0.5/32 -p tcp -m tcp --dport 8000:8010 -j ACCEPT
+        \\-A NETBIRD-ACL-INPUT -s 10.0.0.6/32 -p tcp -m multiport --dports 80,443 -j ACCEPT
         \\
     , acl3);
     const pre3 = try runList(alloc, "mangle", chains.rt_pre);
@@ -207,11 +221,24 @@ test "filter install exact rules, duplicate no-op, delete, cleanup" {
     try std.testing.expectEqualStrings(
         \\-N NETBIRD-RT-PRE
         \\-A NETBIRD-RT-PRE -s 10.0.0.9/32 -i wt0 -p udp -m addrtype --dst-type LOCAL -j MARK --set-xmark 0x1bd20/0xffffffff
+        \\-A NETBIRD-RT-PRE -s 10.0.0.5/32 -i wt0 -p tcp -m tcp --dport 8000:8010 -m addrtype --dst-type LOCAL -j MARK --set-xmark 0x1bd20/0xffffffff
+        \\-A NETBIRD-RT-PRE -s 10.0.0.6/32 -i wt0 -p tcp -m multiport --dports 80,443 -m addrtype --dst-type LOCAL -j MARK --set-xmark 0x1bd20/0xffffffff
         \\
     , pre3);
 
     // Unknown id is a no-op.
     try filter.deleteFilterRule(&m, "no-such-rule");
+
+    // Range/list rules delete by their stored (plural multiport) specs.
+    try filter.deleteFilterRule(&m, range_id);
+    try filter.deleteFilterRule(&m, list_id);
+    const acl4 = try runList(alloc, "filter", chains.acl_input);
+    defer alloc.free(acl4);
+    try std.testing.expectEqualStrings(
+        \\-N NETBIRD-ACL-INPUT
+        \\-A NETBIRD-ACL-INPUT -s 10.0.0.9/32 -p udp -j DROP
+        \\
+    , acl4);
 
     // reset() removes tracked rules and all static state.
     try filter.deleteFilterRule(&m, drop_id);
