@@ -40,6 +40,8 @@ pub const Error = error{
     NoService,
     NoLocation,
     SoapFault,
+    /// UPnP error 725: the gateway only supports permanent leases.
+    PermanentLeaseOnly,
     NatDisabled,
     InvalidProtocol,
     NoInternalAddress,
@@ -328,10 +330,32 @@ pub fn buildSoapCall(buf: []u8, urn: []const u8, action: []const u8, args: []con
     return buf[0..len];
 }
 
+pub fn hasSoapFault(xml: []const u8) bool {
+    return std.mem.indexOf(u8, xml, "<s:Fault>") != null or
+        std.mem.indexOf(u8, xml, "<SOAP-ENV:Fault>") != null;
+}
+
+/// Port of upstream's upnpErrPermanentLeaseOnly
+/// (`<errorCode>\s*725\s*</errorCode>`): error 725 means the gateway only
+/// supports permanent leases, so the manager retries with lease 0.
+pub fn isPermanentLeaseOnly(xml: []const u8) bool {
+    var rest = xml;
+    while (std.mem.indexOf(u8, rest, "<errorCode>")) |i| {
+        rest = rest[i + "<errorCode>".len ..];
+        var j: usize = 0;
+        while (j < rest.len and (rest[j] == ' ' or rest[j] == '\t' or rest[j] == '\r' or rest[j] == '\n')) j += 1;
+        if (j + 3 <= rest.len and std.mem.eql(u8, rest[j .. j + 3], "725")) {
+            j += 3;
+            while (j < rest.len and (rest[j] == ' ' or rest[j] == '\t' or rest[j] == '\r' or rest[j] == '\n')) j += 1;
+            if (std.mem.startsWith(u8, rest[j..], "</errorCode>")) return true;
+        }
+    }
+    return false;
+}
+
 /// Extract <name>value</name> from a SOAP body, unescaping entities.
 pub fn soapResult(xml: []const u8, name: []const u8, out: []u8) Error![]u8 {
-    if (std.mem.indexOf(u8, xml, "<s:Fault>") != null or
-        std.mem.indexOf(u8, xml, "<SOAP-ENV:Fault>") != null) return Error.SoapFault;
+    if (hasSoapFault(xml)) return Error.SoapFault;
     const raw = findTag(xml, name) orelse return Error.BadXml;
     return unescapeXml(raw, out);
 }
@@ -812,7 +836,14 @@ pub const Client = struct {
         var body_buf: [2048]u8 = undefined;
         const body = try buildSoapCall(&body_buf, c.urn(), action, args);
         var req_buf: [4096]u8 = undefined;
-        return httpPostSoap(c.controlUrl(), c.urn(), action, body, &req_buf, resp_buf, c.timeout_ms);
+        const resp = try httpPostSoap(c.controlUrl(), c.urn(), action, body, &req_buf, resp_buf, c.timeout_ms);
+        // A fault body is an error, not a result (goupnp checks it too);
+        // 725 additionally tells the manager to retry with a permanent lease.
+        if (hasSoapFault(resp)) {
+            if (isPermanentLeaseOnly(resp)) return Error.PermanentLeaseOnly;
+            return Error.SoapFault;
+        }
+        return resp;
     }
 
     /// Port of GetNATRSIPStatusCtx use: (rsip_available, nat_enabled).

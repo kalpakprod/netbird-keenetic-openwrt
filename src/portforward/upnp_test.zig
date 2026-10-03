@@ -123,18 +123,27 @@ test "soap escaping only touches angle brackets and ampersand" {
     try std.testing.expect(std.mem.indexOf(u8, got, "<D>a&lt;b&gt;&amp;\"'c</D>") != null);
 }
 
+test "725 fault matcher mirrors upstream regex" {
+    try std.testing.expect(upnp.isPermanentLeaseOnly("<errorCode>725</errorCode>"));
+    try std.testing.expect(upnp.isPermanentLeaseOnly("<errorCode>\n  725\r\n</errorCode>"));
+    try std.testing.expect(!upnp.isPermanentLeaseOnly("<errorCode>718</errorCode>"));
+    try std.testing.expect(!upnp.isPermanentLeaseOnly("<errorCode>7250</errorCode>"));
+    try std.testing.expect(!upnp.isPermanentLeaseOnly("no fault here"));
+    try std.testing.expect(upnp.hasSoapFault("<s:Fault><detail>upnp</detail></s:Fault>"));
+    try std.testing.expect(!upnp.hasSoapFault("<u:AddPortMappingResponse/>"));
+}
+
 const tio = std.testing.io;
 
-fn testEnv(out: []u8) ?[]u8 {
+fn testEnvVar(out: []u8, name: []const u8) ?[]u8 {
     var file = std.Io.Dir.openFileAbsolute(tio, "/proc/self/environ", .{ .mode = .read_only }) catch return null;
     defer file.close(tio);
     var ebuf: [65536]u8 = undefined;
     const n = file.readPositionalAll(tio, &ebuf, 0) catch return null;
     var entries = std.mem.splitScalar(u8, ebuf[0..n], 0);
-    const prefix = "IGD_TEST_ADDR=";
     while (entries.next()) |e| {
-        if (std.mem.startsWith(u8, e, prefix)) {
-            const v = e[prefix.len..];
+        if (e.len > name.len and std.mem.eql(u8, e[0..name.len], name) and e[name.len] == '=') {
+            const v = e[name.len + 1 ..];
             if (v.len == 0 or v.len > out.len) return null;
             @memcpy(out[0..v.len], v);
             return out[0..v.len];
@@ -143,30 +152,34 @@ fn testEnv(out: []u8) ?[]u8 {
     return null;
 }
 
-test "live unicast discover and map via fake IGD" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
-    var env_buf: [64]u8 = undefined;
-    const env = testEnv(&env_buf) orelse return error.SkipZigTest;
-    _ = env;
-    // Gateway is always loopback in this test; the env only gates execution.
+fn testEnv(out: []u8) ?[]u8 {
+    return testEnvVar(out, "IGD_TEST_ADDR");
+}
+
+/// Unicast discovery against the loopback fake; returns the location slice.
+fn discoverLoopback(keep: *[128]u8) upnp.Error!?[]u8 {
     const gw: [4]u8 = .{ 127, 0, 0, 1 };
     var locations: [4][128]u8 = undefined;
-    var keep: [128]u8 = undefined;
-    var found_len: usize = 0;
     for ([_][]const u8{ upnp.st_igdv2, upnp.st_igdv1, upnp.st_all }) |target| {
         const n = try upnp.searchUnicast(gw, target, &locations, 2000);
         for (locations[0..n]) |*slot| {
             const loc = std.mem.sliceTo(slot, 0);
             if (upnp.locationHasAddr(loc, gw)) {
                 @memcpy(keep[0..loc.len], loc);
-                found_len = loc.len;
-                break;
+                return keep[0..loc.len];
             }
         }
-        if (found_len > 0) break;
     }
-    if (found_len == 0) return error.SkipZigTest;
-    const location = keep[0..found_len];
+    return null;
+}
+
+test "live unicast discover and map via fake IGD" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var env_buf: [64]u8 = undefined;
+    if (testEnv(&env_buf) == null) return error.SkipZigTest;
+    // Gateway is always loopback in this test; the env only gates execution.
+    var keep: [128]u8 = undefined;
+    const location = (try discoverLoopback(&keep)) orelse return error.SkipZigTest;
     var disc = try upnp.clientFromLocation(location, 5000);
     const ext = try disc.client.externalAddress();
     try std.testing.expectEqualSlices(u8, &[_]u8{ 203, 0, 113, 9 }, &ext);
@@ -196,4 +209,21 @@ test "live multicast discover finds fake IGD" {
         if (std.mem.indexOf(u8, loc, "127.0.0.1") != null) saw_fake = true;
     }
     try std.testing.expect(n >= 1 and saw_fake);
+}
+
+test "live permanent-only gateway reports 725 then takes lease 0" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var env_buf: [64]u8 = undefined;
+    // The fake must run with FAKEIGD_PERMANENT_ONLY=1 for this test.
+    if (testEnvVar(&env_buf, "IGD_TEST_725") == null) return error.SkipZigTest;
+    var keep: [128]u8 = undefined;
+    const location = (try discoverLoopback(&keep)) orelse return error.SkipZigTest;
+    var disc = try upnp.clientFromLocation(location, 5000);
+    try std.testing.expectError(
+        upnp.Error.PermanentLeaseOnly,
+        disc.client.addPortMapping("udp", 51820, "netbird", 3600),
+    );
+    const ext = try disc.client.addPortMapping("udp", 51820, "netbird", 0);
+    try std.testing.expect(ext >= 10000);
+    try disc.client.deletePortMapping("udp", 51820);
 }
