@@ -245,14 +245,29 @@ test "prefs put get remove" {
 }
 
 test "userConfigDir reads the environment" {
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
     // override path (no env needed)
     profile.config_dir_override = "/tmp/nb-override";
-    const over = try profile.userConfigDir(std.testing.allocator);
+    const over = try profile.userConfigDir(std.testing.allocator, env);
     defer std.testing.allocator.free(over);
     try std.testing.expectEqualStrings("/tmp/nb-override", over);
     profile.config_dir_override = "";
-    // env path: HOME is set for tests, result ends in /netbird
-    const dir = try profile.userConfigDir(std.testing.allocator);
-    defer std.testing.allocator.free(dir);
-    try std.testing.expect(std.mem.endsWith(u8, dir, "/netbird"));
+    // XDG path wins over HOME
+    try env.put("XDG_CONFIG_HOME", "/tmp/nb-xdg");
+    try env.put("HOME", "/tmp/nb-home");
+    const xdg = try profile.userConfigDir(std.testing.allocator, env);
+    defer std.testing.allocator.free(xdg);
+    try std.testing.expectEqualStrings("/tmp/nb-xdg/netbird", xdg);
+    // HOME fallback: fresh map without XDG
+    var env2 = std.process.Environ.Map.init(std.testing.allocator);
+    defer env2.deinit();
+    try env2.put("HOME", "/tmp/nb-home");
+    const home = try profile.userConfigDir(std.testing.allocator, env2);
+    defer std.testing.allocator.free(home);
+    try std.testing.expectEqualStrings("/tmp/nb-home/.config/netbird", home);
+    // neither set: error
+    var env3 = std.process.Environ.Map.init(std.testing.allocator);
+    defer env3.deinit();
+    try std.testing.expectError(error.EnvironmentVariableNotFound, profile.userConfigDir(std.testing.allocator, env3));
 }

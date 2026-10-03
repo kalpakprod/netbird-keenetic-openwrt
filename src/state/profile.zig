@@ -27,49 +27,18 @@ pub const state_file_suffix = ".state.json";
 /// Test hook mirroring ConfigDirOverride.
 pub var config_dir_override: []const u8 = "";
 
-/// getenv without libc: Zig 0.17 std has no public environment API, so scan
-/// /proc/self/environ with raw syscalls (Linux-only, like the XDG lookup).
-fn getenvOwned(allocator: std.mem.Allocator, key: []const u8) !?[]u8 {
-    const linux = std.os.linux;
-    const fd_usize = linux.open("/proc/self/environ", .{ .CLOEXEC = true }, 0);
-    if (fd_usize > 0xfffffffffffff000) return error.CannotReadEnviron;
-    const fd: linux.fd_t = @intCast(fd_usize);
-    defer _ = linux.close(fd);
-    var buf: [8192]u8 = undefined;
-    var len: usize = 0;
-    while (len < buf.len) {
-        const n = linux.read(fd, buf[len..].ptr, buf.len - len);
-        if (n > 0xfffffffffffff000) return error.CannotReadEnviron;
-        if (n == 0) break;
-        len += n;
-    }
-    var rest = buf[0..len];
-    while (rest.len > 0) {
-        const end = std.mem.indexOfScalar(u8, rest, 0) orelse break;
-        const entry = rest[0..end];
-        rest = rest[end + 1 ..];
-        const eq = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
-        if (std.mem.eql(u8, entry[0..eq], key)) {
-            return try allocator.dupe(u8, entry[eq + 1 ..]);
-        }
-    }
-    return null;
-}
-
 /// User config dir for profile state/email files. Mirrors getConfigDir on
 /// Linux: $XDG_CONFIG_HOME/netbird or ~/.config/netbird (no sudo/MDM logic).
-pub fn userConfigDir(allocator: std.mem.Allocator) ![]u8 {
+/// Takes the process environment map (std.process.Init.environ_map) from
+/// the caller: no libc getenv, no /proc scan.
+pub fn userConfigDir(allocator: std.mem.Allocator, environ: std.process.Environ.Map) ![]u8 {
     if (config_dir_override.len > 0) {
         return allocator.dupe(u8, config_dir_override);
     }
-    if (try getenvOwned(allocator, "XDG_CONFIG_HOME")) |base| {
-        defer allocator.free(base);
+    if (environ.get("XDG_CONFIG_HOME")) |base| {
         return std.fmt.allocPrint(allocator, "{s}/netbird", .{base});
     }
-    const home = (try getenvOwned(allocator, "HOME")) orelse {
-        return error.EnvironmentVariableNotFound;
-    };
-    defer allocator.free(home);
+    const home = environ.get("HOME") orelse return error.EnvironmentVariableNotFound;
     return std.fmt.allocPrint(allocator, "{s}/.config/netbird", .{home});
 }
 
