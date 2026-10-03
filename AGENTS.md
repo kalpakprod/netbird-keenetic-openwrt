@@ -33,7 +33,13 @@ The lead (Claude session) owns PLAN.md, decisions, commits and pushes. Workers e
 ## Hard rules
 - Never touch production: no ssh to routers or servers, no NetBird accounts, no real setup keys, no netbird.cloud logins.
   Integration tests run only against local stubs or a local upstream stack the lead provides.
-- No commits, pushes, branch switches or worktrees. The lead commits.
+- Never commit on main, switch branches or push main. All changes go through PRs (owner 2026-10-03: many real PRs and commits,
+  never empty or fake ones). After your card passes its own tests, open a PR with exactly your card's files:
+  `scripts/pr.sh <type>/<short-name> "<type>(<module>): <what>" <paths>...` (types: feat, fix, test, docs, chore, ci).
+  One PR per module or logical step; split big work into several PRs. Put the PR URL in your report.
+- Review: the other agent reviews each PR (different model family) and posts the verdict on GitHub:
+  `gh pr review <n> --comment -b "<verdict ДА/НЕТ + findings>"`. On ДА with `zig build test` passing, the reviewer runs
+  `scripts/merge-pr.sh <n>`. On НЕТ the author fixes, pushes to the same branch, reviewer re-checks (two rounds max, then the lead).
 - No new tools or packages (pip, npm, pacman, go install) without the lead. `go list`, `go test` on upstream code, zig, qemu are allowed.
 - Machine load: before any heavy command check `/proc/loadavg` and `/proc/pressure/io`; wait if 1-min load > 12 or IO full avg10 > 5.
   One heavy command at a time. Test only your own files, never a whole suite.
