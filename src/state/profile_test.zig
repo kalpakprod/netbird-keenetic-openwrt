@@ -134,6 +134,27 @@ test "profile state path validation" {
     try std.testing.expectError(profile.Error.InvalidName, profile.profileStatePath(std.testing.allocator, "/cfg", ""));
 }
 
+test "profile stem matches Go IsValidProfileFilenameStem" {
+    const ok = [_][]const u8{ "default", "abc", "ABC-xyz_019", "é", "Профиль", "under_score", "with-dash" };
+    for (ok) |s| {
+        try std.testing.expect(profile.isValidProfileFilenameStem(s));
+    }
+    const bad = [_][]const u8{
+        "",          "a:b", "a b",  "a.b",   "a/b", "a\\b", "..", "../evil",
+        "a\tb",      "a\n", "\xff", "a\xff",
+        "a😀",
+        "trailing ",
+    };
+    for (bad) |s| {
+        try std.testing.expect(!profile.isValidProfileFilenameStem(s));
+    }
+    // 64 ok, 65 rejected (Go counts bytes)
+    const stem64 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const stem65 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    try std.testing.expect(profile.isValidProfileFilenameStem(stem64));
+    try std.testing.expect(!profile.isValidProfileFilenameStem(stem65));
+}
+
 test "prefs put get remove" {
     const dir = try scratchRoot(std.testing.allocator);
     defer std.testing.allocator.free(dir);
