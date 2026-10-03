@@ -220,6 +220,29 @@ pub const Manager = struct {
         e.raw = try m.allocator.dupe(u8, raw);
     }
 
+    /// Import one file section into memory as unregistered (RawState
+    /// equivalent), without dirty-marking. Caller-driven PerformCleanup
+    /// calls this for saved names no registered type claims, so a later
+    /// persist keeps those sections byte-identical instead of dropping
+    /// them (upstream cleanupSingleState, manager.go:394-399). Names
+    /// already in memory or absent from the file are left alone.
+    pub fn preserveRaw(m: *Manager, name: []const u8) Error!void {
+        if (m.entries.contains(name)) return;
+        const raw_states = try m.loadStateFile(false);
+        var states = raw_states orelse return;
+        defer states.deinit();
+        const raw = states.value.map.get(name) orelse return;
+        const section = std.json.Stringify.valueAlloc(m.allocator, raw, .{}) catch {
+            return Error.CorruptState;
+        };
+        defer m.allocator.free(section);
+        const key = try m.allocator.dupe(u8, name);
+        errdefer m.allocator.free(key);
+        const owned = try m.allocator.dupe(u8, section);
+        errdefer m.allocator.free(owned);
+        try m.entries.put(key, .{ .raw = owned, .registered = false });
+    }
+
     /// GetSavedStateNames: names in the file with non-null values.
     pub fn savedNames(m: *Manager) Error![][]u8 {
         const raw_states = try m.loadStateFile(false);
