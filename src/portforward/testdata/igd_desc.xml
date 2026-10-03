@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+<specVersion><major>1</major><minor>0</minor></specVersion>
+<URLBase>http://127.0.0.1:54321/</URLBase>
+<device>
+<deviceType>urn:schemas-upnp-org:device:InternetGatewayDevice:2</deviceType>
+<friendlyName>FakeIGD</friendlyName>
+<manufacturer>Test</manufacturer>
+<modelName>FakeIGD1</modelName>
+<UDN>uuid:fake-igd-0001</UDN>
+<serviceList>
+<service>
+<serviceType>urn:schemas-upnp-org:service:WANIPConnection:2</serviceType>
+<serviceId>urn:upnp-org:serviceId:WANIPConn1</serviceId>
+<SCPDURL>/scpd.xml</SCPDURL>
+<controlURL>/ctl/ip2</controlURL>
+<eventSubURL>/evt/ip2</eventSubURL>
+</service>
+<service>
+<serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType>
+<serviceId>urn:upnp-org:serviceId:WANIPConn2</serviceId>
+<SCPDURL>/scpd.xml</SCPDURL>
+<controlURL>/ctl/ip1</controlURL>
+<eventSubURL>/evt/ip1</eventSubURL>
+</service>
+</serviceList>
+</device>
+</root>
