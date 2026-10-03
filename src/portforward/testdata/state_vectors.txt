@@ -1,0 +1,6 @@
+# Go json.Marshal oracle for State (gen/pfstate, encoding/json, v0.79.0).
+# Format: internal_port protocol json-bytes; "-" means empty/zero.
+full 51820 udp {"internal_port":51820,"protocol":"udp"}
+noport 0 udp {"protocol":"udp"}
+noproto 51820 - {"internal_port":51820}
+empty 0 - {}
