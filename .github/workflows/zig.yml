@@ -1,0 +1,19 @@
+name: zig
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.17.0
+      - run: zig build test
+      - run: zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSmall
+      - uses: actions/upload-artifact@v4
+        with:
+          name: netbird-aarch64-musl
+          path: zig-out/bin/netbird
