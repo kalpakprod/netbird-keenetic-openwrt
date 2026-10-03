@@ -7,7 +7,9 @@ const std = @import("std");
 pub const Error = error{
     InvalidPrefix,
     InvalidBits,
+    InvalidPort,
     NoSources,
+    IpsetRequired,
     OutOfMemory,
 };
 
@@ -289,6 +291,10 @@ pub const SpecBuilder = struct {
     }
 
     pub fn appendSpec(b: *SpecBuilder, spec: []const []const u8) Error!void {
+        for (spec) |a| try b.arg(a);
+    }
+
+    pub fn appendOwned(b: *SpecBuilder, spec: Spec) Error!void {
         for (spec) |a| try b.arg(a);
     }
 

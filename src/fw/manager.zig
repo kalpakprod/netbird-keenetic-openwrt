@@ -20,6 +20,9 @@ pub const Manager = struct {
     /// WireGuard interface name, owned.
     iface: []u8,
     mtu: u16,
+    /// True when the runner points at ip6tables (affects icmp mapping).
+    /// One Manager covers one family; the engine owns two (v4 + v6).
+    v6: bool,
     /// Filter rules by owned rule id (filter.zig).
     filters: std.StringHashMapUnmanaged(model.FilterRule) = .empty,
     /// NAT and legacy route rules by owned GenKey (nat.zig).
@@ -32,6 +35,7 @@ pub const Manager = struct {
         iptables_path: []const u8,
         iface: []const u8,
         mtu: u16,
+        v6: bool,
     ) Error!Manager {
         const owned_iface = alloc.dupe(u8, iface) catch return Error.OutOfMemory;
         errdefer alloc.free(owned_iface);
@@ -41,6 +45,7 @@ pub const Manager = struct {
             .runner = .{ .path = iptables_path, .alloc = alloc, .io = io },
             .iface = owned_iface,
             .mtu = mtu,
+            .v6 = v6,
         };
     }
 

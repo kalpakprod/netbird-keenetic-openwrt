@@ -236,7 +236,7 @@ test "chains setup exact rules, idempotent re-apply, full cleanup" {
     const pristine_nat = try runSave(alloc, "nat");
     defer alloc.free(pristine_nat);
 
-    var m = try manager_mod.Manager.init(alloc, tio, "iptables", "wt0", 1280);
+    var m = try manager_mod.Manager.init(alloc, tio, "iptables", "wt0", 1280, false);
     defer m.deinit();
     defer m.reset() catch {};
 
