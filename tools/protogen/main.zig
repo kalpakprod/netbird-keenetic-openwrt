@@ -1,11 +1,12 @@
 //! protogen — protobuf code generator for the NetBird Zig port.
-//! PR 1 scope: `protogen parse <file.proto>` parses the proto3 subset and
-//! prints the message tree, so the parse of the real upstream files can be
-//! inspected. Generation lands in the following PRs.
+//! `protogen parse <file.proto>` parses the proto3 subset and prints the
+//! message tree. `protogen generate <file.proto> <out.zig>` emits the Zig
+//! codecs (structs + size/encode/decode/deinit on src/proto/wire.zig).
 
 const std = @import("std");
 const ast = @import("ast.zig");
 const parser = @import("parser.zig");
+const gen = @import("gen.zig");
 
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
@@ -29,11 +30,37 @@ pub fn main(init: std.process.Init) !void {
         printFile(a, file);
         return;
     }
+    if (std.mem.eql(u8, cmd, "generate")) {
+        const path = it.next() orelse return usage();
+        const out_path = it.next() orelse return usage();
+        const src = std.Io.Dir.cwd().readFileAlloc(init.io, path, a, .limited(64 << 20)) catch |e| {
+            std.debug.print("protogen: cannot read {s}: {s}\n", .{ path, @errorName(e) });
+            return error.Failure;
+        };
+        var p = parser.Parser.init(a, src) catch |e| {
+            std.debug.print("protogen: {s}: {s}\n", .{ path, @errorName(e) });
+            return error.Failure;
+        };
+        const file = p.parse() catch |e| {
+            std.debug.print("protogen: {s}: line {d}: {s}\n", .{ path, p.err_line, @errorName(e) });
+            return error.Failure;
+        };
+        const out = gen.generate(a, &file, path) catch |e| {
+            std.debug.print("protogen: {s}: {s}\n", .{ path, @errorName(e) });
+            return error.Failure;
+        };
+        std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = out_path, .data = out }) catch |e| {
+            std.debug.print("protogen: cannot write {s}: {s}\n", .{ out_path, @errorName(e) });
+            return error.Failure;
+        };
+        std.debug.print("protogen: {s} -> {s} ({d} bytes, {d} messages)\n", .{ path, out_path, out.len, file.messages.len });
+        return;
+    }
     return usage();
 }
 
 fn usage() error{Failure} {
-    std.debug.print("usage: protogen parse <file.proto>\n", .{});
+    std.debug.print("usage: protogen parse <file.proto> | protogen generate <file.proto> <out.zig>\n", .{});
     return error.Failure;
 }
 
@@ -125,4 +152,6 @@ test {
     _ = @import("lexer.zig");
     _ = @import("parser.zig");
     _ = @import("parser_test.zig");
+    _ = @import("gen.zig");
+    _ = @import("gen_test.zig");
 }

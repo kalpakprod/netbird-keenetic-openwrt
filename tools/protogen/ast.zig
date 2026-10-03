@@ -69,7 +69,7 @@ pub const Field = struct {
     name: []const u8,
     number: i32,
     options: []const Option = &.{},
-    line: u32,
+    line: u32 = 0,
 
     pub fn isMap(f: *const Field) bool {
         return switch (f.typ) {
@@ -105,28 +105,28 @@ pub const ReservedRange = struct {
 
 pub const Enum = struct {
     name: []const u8,
-    values: []EnumValue,
-    reserved: []ReservedRange = &.{},
-    line: u32,
+    values: []const EnumValue,
+    reserved: []const ReservedRange = &.{},
+    line: u32 = 0,
 };
 
 pub const Oneof = struct {
     name: []const u8,
-    fields: []Field,
-    line: u32,
+    fields: []const Field,
+    line: u32 = 0,
 };
 
 pub const Message = struct {
     name: []const u8,
     /// Plain and map fields in declaration order (oneof fields live in
     /// `.oneofs`, not here).
-    fields: []Field = &.{},
-    maps: []MapField = &.{},
-    oneofs: []Oneof = &.{},
-    enums: []Enum = &.{},
-    messages: []Message = &.{},
-    reserved: []ReservedRange = &.{},
-    line: u32,
+    fields: []const Field = &.{},
+    maps: []const MapField = &.{},
+    oneofs: []const Oneof = &.{},
+    enums: []const Enum = &.{},
+    messages: []const Message = &.{},
+    reserved: []const ReservedRange = &.{},
+    line: u32 = 0,
 };
 
 pub const Import = struct {
@@ -136,7 +136,7 @@ pub const Import = struct {
 pub const File = struct {
     syntax: []const u8,
     package: []const u8,
-    imports: []Import = &.{},
-    messages: []Message = &.{},
-    enums: []Enum = &.{},
+    imports: []const Import = &.{},
+    messages: []const Message = &.{},
+    enums: []const Enum = &.{},
 };
