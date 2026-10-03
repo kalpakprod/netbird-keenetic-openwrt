@@ -37,6 +37,29 @@ test "handshake retry then give up" {
     try std.testing.expect(z.zero_key_material);
 }
 
+test "give up cancels pending keepalive" {
+    var t: timers.Timers = .{};
+    t.start();
+    // keepalive armed for later, attempts exhausted, retransmit due now
+    t.send_keepalive = 100_000;
+    t.handshake_attempts = 4; // > max(3)
+    t.retransmit_handshake = 5_000;
+    const a = t.poll(5_000, C, 0, true);
+    try std.testing.expect(a.give_up);
+    try std.testing.expect(t.send_keepalive == null);
+    // later poll stays quiet: the cancelled keepalive never fires
+    const late = t.poll(100_000, C, 0, true);
+    try std.testing.expect(!late.send_keepalive);
+    // same when both expire at once: give-up wins, no keepalive action
+    t.send_keepalive = 200_000;
+    t.handshake_attempts = 9;
+    t.retransmit_handshake = 200_000;
+    const b = t.poll(200_000, C, 0, true);
+    try std.testing.expect(b.give_up);
+    try std.testing.expect(!b.send_keepalive);
+    try std.testing.expect(t.send_keepalive == null);
+}
+
 test "handshake complete resets attempts" {
     var t: timers.Timers = .{};
     t.handshakeInitiated(0, C, 0, true);
