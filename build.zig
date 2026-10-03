@@ -34,6 +34,18 @@ pub fn build(b: *std.Build) void {
     discoverTests(b, test_step, target, optimize, src_dir, "src", is_native) catch |err| {
         std.debug.print("test discovery failed: {t}\n", .{err});
     };
+
+    // protogen tests live under tools/ and are not covered by src/ discovery.
+    const proto_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/protogen/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    if (is_native) {
+        test_step.dependOn(&b.addRunArtifact(proto_tests).step);
+    } else {
+        test_step.dependOn(&proto_tests.step);
+    }
 }
 
 fn discoverTests(
