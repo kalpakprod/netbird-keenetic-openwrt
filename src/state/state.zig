@@ -90,8 +90,14 @@ pub const Manager = struct {
     }
 
     /// Update a state from already-encoded JSON (RawState equivalent).
+    /// Rejects malformed JSON like Go's json.Marshal check, before any
+    /// mutation, so the entry, dirty set and file stay untouched.
     pub fn updateRaw(m: *Manager, name: []const u8, raw_json: []const u8) Error!void {
         if (!m.entries.contains(name)) return Error.StateNotRegistered;
+        var check = std.json.parseFromSlice(std.json.Value, m.allocator, raw_json, .{}) catch {
+            return profile.FileError.InvalidJson;
+        };
+        check.deinit();
         try m.setRaw(name, raw_json);
     }
 

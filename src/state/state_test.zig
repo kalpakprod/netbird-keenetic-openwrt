@@ -131,6 +131,30 @@ test "deleteByName needs the name in the file" {
     try std.testing.expectEqualSlices(u8, "{\"sample\":null}", data);
 }
 
+test "updateRaw rejects malformed JSON" {
+    const root = try scratchRoot(std.testing.allocator, "badraw");
+    defer std.testing.allocator.free(root);
+    defer cleanup(root);
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/state.json", .{root});
+    defer std.testing.allocator.free(path);
+
+    var m = state.Manager.init(std.testing.allocator, tio, path);
+    defer m.deinit();
+    try m.register("x");
+    try m.updateRaw("x", "{\"ok\":true}");
+    try m.persist();
+    try std.testing.expectError(profile.FileError.InvalidJson, m.updateRaw("x", "{oops"));
+    // entry and file unchanged, still clean
+    const O = struct { ok: bool };
+    var got = (try m.get("x", O)).?;
+    defer got.deinit();
+    try std.testing.expect(got.value.ok);
+    try m.persist();
+    const data = try profile.readFileLseek(tio, std.testing.allocator, path);
+    defer std.testing.allocator.free(data);
+    try std.testing.expectEqualSlices(u8, "{\"x\":{\"ok\":true}}", data);
+}
+
 test "deleteAll counts file states" {
     const root = try scratchRoot(std.testing.allocator, "delall");
     defer std.testing.allocator.free(root);
