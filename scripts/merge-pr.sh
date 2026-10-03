@@ -1,7 +1,18 @@
 #!/bin/sh
-# merge-pr.sh <pr-number>: merge a reviewed PR (merge commit) and sync the shared work dir to origin/main.
-# The work dir never holds local commits, so `reset --mixed` only moves HEAD/index; working files stay as they are.
+# merge-pr.sh <pr-number>: merge a reviewed PR locally and push main, so the merge commit carries the repo's
+# noreply identity (GitHub web merges sign with the account's primary email). Deletes the branch, then syncs the
+# shared work dir: it never holds local commits, so `reset --mixed` only moves HEAD/index; working files stay.
 set -eu
-gh pr merge "$1" --merge --delete-branch
-cd "$(git rev-parse --show-toplevel)"; git fetch -q origin; git reset -q --mixed origin/main
-git log --oneline -1
+n=$1; top=$(git rev-parse --show-toplevel); cd "$top"
+br=$(gh pr view "$n" --json headRefName -q .headRefName)
+title=$(gh pr view "$n" --json title -q .title)
+git fetch -q origin main "$br"
+wt=$HOME/.cache/netbird-zig-context/wt-merge-$n
+git worktree add -q --detach "$wt" origin/main
+trap 'git -C "$top" worktree remove --force "$wt"' EXIT
+cd "$wt"
+git merge -q --no-ff "origin/$br" -m "Merge pull request #$n from kalpakprod/$br" -m "$title"
+git push -q origin HEAD:main
+git push -q origin --delete "$br"
+cd "$top"; git fetch -q origin; git reset -q --mixed origin/main
+echo "PR #$n: $(gh pr view "$n" --json state -q .state)"; git log --oneline -1
