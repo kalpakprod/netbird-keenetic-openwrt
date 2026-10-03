@@ -114,13 +114,12 @@ test "malformed responses rejected" {
 
 const tio = std.testing.io;
 
-fn testAddrFromEnviron(out: []u8) ?[]u8 {
+fn testEnvFromEnviron(out: []u8, prefix: []const u8) ?[]u8 {
     var file = std.Io.Dir.openFileAbsolute(tio, "/proc/self/environ", .{ .mode = .read_only }) catch return null;
     defer file.close(tio);
     var ebuf: [65536]u8 = undefined;
     const n = file.readPositionalAll(tio, &ebuf, 0) catch return null;
     var entries = std.mem.splitScalar(u8, ebuf[0..n], 0);
-    const prefix = "PCP_TEST_ADDR=";
     while (entries.next()) |e| {
         if (std.mem.startsWith(u8, e, prefix)) {
             const v = e[prefix.len..];
@@ -130,6 +129,16 @@ fn testAddrFromEnviron(out: []u8) ?[]u8 {
         }
     }
     return null;
+}
+
+fn testAddrFromEnviron(out: []u8) ?[]u8 {
+    return testEnvFromEnviron(out, "PCP_TEST_ADDR=");
+}
+
+fn nowMsLocal() i64 {
+    var ts: linux.timespec = undefined;
+    _ = linux.clock_gettime(.MONOTONIC, &ts);
+    return ts.sec * 1000 + @divTrunc(ts.nsec, 1_000_000);
 }
 
 test "live exchange with fake gateway" {
@@ -168,4 +177,20 @@ test "no gateway and no local are errors" {
     try std.testing.expectError(pcp.Error.NoLocalIP, c.announce());
     c.setLocal4(.{ 127, 0, 0, 1 });
     try std.testing.expectError(pcp.Error.NoGateway, c.announce());
+}
+
+test "dead gateway fails within the total budget" {
+    // Namespace only (PF_TEST_NS set): 192.0.2.1 is unroutable there, so no
+    // packet leaves and the retry sleeps prove the deadline bound.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var mbuf: [16]u8 = undefined;
+    if (testEnvFromEnviron(&mbuf, "PF_TEST_NS=") == null) return error.SkipZigTest;
+    var c = pcp.Client{};
+    c.setGateway4(.{ 192, 0, 2, 1 });
+    c.setLocal4(.{ 127, 0, 0, 1 });
+    c.timeout_ms = 1500;
+    const t0 = nowMsLocal();
+    if (c.announce()) |_| return error.ExpectedFailure else |_| {}
+    const dt = nowMsLocal() - t0;
+    try std.testing.expect(dt >= 1400 and dt < 3000);
 }

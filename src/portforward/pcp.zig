@@ -184,6 +184,7 @@ pub const Client = struct {
     has_gateway: bool = false,
     local_ip16: [16]u8 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
     has_local: bool = false,
+    /// Total budget for one request, like Go's context deadline (not per attempt).
     timeout_ms: i32 = default_timeout_ms,
     retries: u8 = default_retries,
     last_epoch: u32 = 0,
@@ -271,7 +272,7 @@ pub const Client = struct {
         return lost;
     }
 
-    fn sendOnce(c: *Client, req: []const u8, resp_buf: []u8) Error!usize {
+    fn sendOnce(c: *Client, req: []const u8, resp_buf: []u8, wait_ms: i32) Error!usize {
         if (!c.has_gateway) return Error.NoGateway;
         const domain: u32 = if (c.gateway_is_v6) linux.AF.INET6 else linux.AF.INET;
         // Fresh socket per attempt, like the Go sendOnce.
@@ -300,7 +301,7 @@ pub const Client = struct {
         const sent = linux.sendto(fd, req.ptr, req.len, 0, dest, sa_len);
         if (failed(sent) or sent != req.len) return Error.SendFailed;
         var pfd = [_]linux.pollfd{.{ .fd = fd, .events = linux.POLL.IN }};
-        const prc = linux.poll(&pfd, 1, c.timeout_ms);
+        const prc = linux.poll(&pfd, 1, wait_ms);
         if (failed(prc)) return Error.RecvFailed;
         if (prc == 0) return Error.Timeout;
         var from_buf: [@sizeOf(linux.sockaddr.in6)]u8 align(@alignOf(linux.sockaddr.in6)) = undefined;
@@ -322,22 +323,33 @@ pub const Client = struct {
         return n;
     }
 
-    /// Port of sendRequest: RFC 6887 §8.1.1 retries with ±10% jitter.
+    /// Port of sendRequest: RFC 6887 §8.1.1 retries with ±10% jitter,
+    /// bounded by the total timeout like Go's context deadline. Each attempt
+    /// waits at most the 3s socket timeout; the dead gateway case costs one
+    /// budget, never the whole retry schedule.
     fn sendRequest(c: *Client, req: []const u8, resp_buf: []u8) Error!usize {
+        if (c.timeout_ms <= 0) return Error.Timeout;
+        const deadline = nowMs() + c.timeout_ms;
         var delay_ms: i64 = initial_retry_ms;
         var attempt: u8 = 0;
         var last_err: Error = Error.Timeout;
         while (attempt < c.retries) : (attempt += 1) {
-            if (c.sendOnce(req, resp_buf)) |n| {
+            const left = deadline - nowMs();
+            if (left <= 0) break;
+            // Go's 3s socket timeout per attempt, capped by the budget left.
+            const wait: i32 = @intCast(@min(left, initial_retry_ms));
+            if (c.sendOnce(req, resp_buf, wait)) |n| {
                 return n;
             } else |err| {
                 last_err = err;
                 if (attempt + 1 >= c.retries) break;
+                const left2 = deadline - nowMs();
+                if (left2 <= 0) break;
                 // Jitter: delay * (1 + RAND), RAND in [-0.1, +0.1].
                 var jb: [1]u8 = undefined;
                 randomBytes(&jb);
                 const num: i64 = 900 + @divTrunc(@as(i64, jb[0]) * 200, 255);
-                const slept = @divTrunc(delay_ms * num, 1000);
+                const slept = @min(@divTrunc(delay_ms * num, 1000), left2);
                 var ts = linux.timespec{
                     .sec = @divTrunc(slept, 1000),
                     .nsec = @mod(slept, 1000) * 1_000_000,
