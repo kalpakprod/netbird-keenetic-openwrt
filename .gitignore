@@ -1,0 +1,4 @@
+upstream/
+zig-out/
+.zig-cache/
+.agent-logs/

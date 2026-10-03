@@ -1,6 +1,12 @@
-# NetBird на роутере: Keenetic (Entware) и OpenWrt
+# NetBird на Zig для роутеров Keenetic (Entware) и OpenWrt
 
 [![ci](https://github.com/kalpakprod/netbird-keenetic-openwrt/actions/workflows/ci.yml/badge.svg)](https://github.com/kalpakprod/netbird-keenetic-openwrt/actions/workflows/ci.yml)
+
+Проект переписывает клиент [NetBird](https://github.com/netbirdio/netbird) с Go на Zig: маленький статический бинарь без C и низкое потребление памяти, чтобы клиент работал на слабых роутерах, включая ядро Linux 4.9. Сборка: `zig build -Dtarget=aarch64-linux-musl -Doptimize=ReleaseSmall` (Zig 0.17). Клиент на Zig ещё не работает, ход работ в [PLAN.md](PLAN.md). Перенесённый код NetBird идёт под BSD-3-Clause, см. [LICENSES/](LICENSES/).
+
+NetBird client rewritten in Zig for Keenetic and OpenWrt routers: small static binary, low RAM, Linux 4.9+. Work in progress.
+
+## Установщик официального клиента
 
 Один скрипт ставит NetBird-клиент на роутер так, чтобы после перезагрузки туннель поднимался сам и роутер оставался доступен из сети NetBird. Платформа определяется автоматически. На Keenetic бинарь по умолчанию берётся из официальных GitHub-релизов NetBird, где архитектура известна, иначе — из пакета Entware; на OpenWrt всегда из официального фида. Подробнее в «Источники бинаря».
 
