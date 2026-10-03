@@ -78,6 +78,31 @@ test "unknown fields ignored like Go" {
     try std.testing.expectEqual(@as(i64, 1), parsed.value.WgPort);
 }
 
+test "parseConfig folds field names like Go" {
+    const mixed =
+        \\{"name": "lower", "wgport": 51821, "managementurl": {"scheme": "https", "host": "h:443"},
+        \\ "serversshallowed": true, "ifaceblacklist": ["a", "b"]}
+    ;
+    var parsed = try profile.parseConfig(std.testing.allocator, mixed);
+    defer parsed.deinit();
+    const c = parsed.value;
+    try std.testing.expectEqualStrings("lower", c.Name);
+    try std.testing.expectEqual(@as(i64, 51821), c.WgPort);
+    try std.testing.expectEqualStrings("https", c.ManagementURL.?.Scheme);
+    try std.testing.expectEqualStrings("h:443", c.ManagementURL.?.Host);
+    try std.testing.expectEqual(true, c.ServerSSHAllowed.?);
+    try std.testing.expectEqual(@as(usize, 2), c.IFaceBlackList.?.len);
+    // duplicates resolve last-wins like Go, regardless of exact/folded
+    const dup1 = "{\"name\": \"folded\", \"Name\": \"exact\"}";
+    var p1 = try profile.parseConfig(std.testing.allocator, dup1);
+    defer p1.deinit();
+    try std.testing.expectEqualStrings("exact", p1.value.Name);
+    const dup2 = "{\"Name\": \"exact\", \"name\": \"folded\"}";
+    var p2 = try profile.parseConfig(std.testing.allocator, dup2);
+    defer p2.deinit();
+    try std.testing.expectEqualStrings("folded", p2.value.Name);
+}
+
 test "defaults fill missing values" {
     var cfg = profile.Config{};
     profile.applyDefaults(&cfg);

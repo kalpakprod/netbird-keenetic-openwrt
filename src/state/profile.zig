@@ -249,11 +249,89 @@ pub fn writeJsonAtomic(io: std.Io, allocator: std.mem.Allocator, path: []const u
     };
 }
 
-/// Parse config JSON. Unknown fields are ignored like Go's Unmarshal.
-/// NOTE: Go matches field names case-insensitively; this port requires
-/// exact names (all real writers use them).
+fn asciiFoldEq(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (std.ascii.toLower(x) != std.ascii.toLower(y)) return false;
+    }
+    return true;
+}
+
+/// Canonical struct field name for a JSON key, or null when the key is
+/// already exact or has no unique case-insensitive match (Go then ignores
+/// the key). Field names are all ASCII, so folding preserves length.
+fn canonicalFieldName(comptime T: type, key: []const u8) ?[]const u8 {
+    const names = @typeInfo(T).@"struct".field_names;
+    inline for (names) |n| {
+        if (std.mem.eql(u8, key, n)) return null;
+    }
+    var match: ?[]const u8 = null;
+    inline for (names) |n| {
+        if (asciiFoldEq(key, n)) {
+            if (match != null) return null;
+            match = n;
+        }
+    }
+    return match;
+}
+
+/// Rename folded keys in place to their canonical field names, mirroring
+/// Go's case-insensitive Unmarshal. Keys come from an alloc_always parse,
+/// so each buffer is owned and exactly key.len (folding keeps length).
+/// Keys colliding after rename resolve last-wins like Go (std.json would
+/// reject the duplicate); dropped entries stay in the parse arena.
+fn canonicalizeObject(comptime T: type, obj: *std.json.ObjectMap) void {
+    var i: usize = 0;
+    while (i < obj.count()) {
+        const key = obj.keys()[i];
+        const final = canonicalFieldName(T, key) orelse key;
+        var later_same = false;
+        for (obj.keys()[i + 1 ..]) |lk| {
+            const lf = canonicalFieldName(T, lk) orelse lk;
+            if (std.mem.eql(u8, final, lf)) {
+                later_same = true;
+                break;
+            }
+        }
+        if (later_same) {
+            obj.swapRemoveAt(i);
+        } else {
+            i += 1;
+        }
+    }
+    for (obj.keys()) |key| {
+        if (canonicalFieldName(T, key)) |canon| {
+            @memcpy(@constCast(key), canon);
+        }
+    }
+}
+
+/// Parse config JSON. Unknown fields are ignored like Go's Unmarshal, and
+/// field names match case-insensitively like Go (exact writers unaffected).
 pub fn parseConfig(allocator: std.mem.Allocator, data: []const u8) Error!std.json.Parsed(Config) {
-    return std.json.parseFromSlice(Config, allocator, data, .{
+    var pre = std.json.parseFromSlice(std.json.Value, allocator, data, .{
+        .allocate = .alloc_always,
+    }) catch {
+        return Error.InvalidJson;
+    };
+    defer pre.deinit();
+    if (pre.value == .object) {
+        canonicalizeObject(Config, &pre.value.object);
+        // Go folds nested URL objects too; User has no exported fields.
+        // Iterate by bytes: renames above did not rehash the map.
+        var nit = pre.value.object.iterator();
+        while (nit.next()) |entry| {
+            const k = entry.key_ptr.*;
+            if (std.mem.eql(u8, k, "ManagementURL") or std.mem.eql(u8, k, "AdminURL")) {
+                if (entry.value_ptr.* == .object) canonicalizeObject(Url, &entry.value_ptr.object);
+            }
+        }
+    }
+    const canon = std.json.Stringify.valueAlloc(allocator, pre.value, .{}) catch {
+        return Error.InvalidJson;
+    };
+    defer allocator.free(canon);
+    return std.json.parseFromSlice(Config, allocator, canon, .{
         .ignore_unknown_fields = true,
         .allocate = .alloc_always,
     }) catch {
