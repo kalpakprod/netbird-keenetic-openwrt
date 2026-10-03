@@ -19,7 +19,7 @@ pub const Error = error{
 };
 
 /// Encrypt: random 24-byte nonce || box(msg). Mirrors Encrypt().
-/// Randomness comes from the caller's Io; out must be msg.len + 36.
+/// Randomness comes from the caller's Io; out must be msg.len + 40.
 pub fn encrypt(
     out: []u8,
     msg: []const u8,
@@ -59,8 +59,14 @@ pub fn decrypt(
     peer_public: keys.Key,
     private: keys.Key,
 ) Error!void {
-    if (encrypted.len < nonce_size + tag_size) {
+    // Mirror Go Decrypt: only len < 24 is a length error; shorter-than-tag
+    // input still reaches box.Open, which fails authentication. The middle
+    // check also keeps the subtraction below from underflowing.
+    if (encrypted.len < nonce_size) {
         return Error.MessageTooShort;
+    }
+    if (encrypted.len < nonce_size + tag_size) {
+        return Error.AuthenticationFailed;
     }
     if (out.len != encrypted.len - nonce_size - tag_size) {
         return Error.MessageTooShort;

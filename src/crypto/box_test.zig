@@ -100,4 +100,16 @@ test "random-nonce round trip and tamper rejection" {
 
     // truncated input rejected
     try std.testing.expectError(box.Error.MessageTooShort, box.decrypt(&pt, ct[0..10], alice_pub, bob_priv));
+
+    // Go checks only len < 24, then box.Open fails: 24..39 is auth failure,
+    // not short input (and must not underflow the length math)
+    var short: [30]u8 = undefined;
+    @memcpy(short[0..24], ct[0..24]);
+    @memset(short[24..30], 0);
+    var pt_any: [1]u8 = undefined;
+    try std.testing.expectError(box.Error.AuthenticationFailed, box.decrypt(&pt_any, &short, alice_pub, bob_priv));
+    // exact boundary: 24 bytes, empty box
+    try std.testing.expectError(box.Error.AuthenticationFailed, box.decrypt(&pt_any, ct[0..24], alice_pub, bob_priv));
+    // 23 bytes stays short
+    try std.testing.expectError(box.Error.MessageTooShort, box.decrypt(&pt_any, ct[0..23], alice_pub, bob_priv));
 }
