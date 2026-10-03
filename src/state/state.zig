@@ -226,19 +226,21 @@ pub const Manager = struct {
     /// persist keeps those sections byte-identical instead of dropping
     /// them (upstream cleanupSingleState, manager.go:394-399). Names
     /// already in memory or absent from the file are left alone.
+    /// The section keeps its original bytes like Go json.RawMessage:
+    /// the file is validated but never parsed into values, so numbers
+    /// are never re-serialized (no f64 rounding of long decimals).
     pub fn preserveRaw(m: *Manager, name: []const u8) Error!void {
         if (m.entries.contains(name)) return;
-        const raw_states = try m.loadStateFile(false);
-        var states = raw_states orelse return;
-        defer states.deinit();
-        const raw = states.value.map.get(name) orelse return;
-        const section = std.json.Stringify.valueAlloc(m.allocator, raw, .{}) catch {
-            return Error.CorruptState;
+        const data = profile.readFileLseek(m.io, m.allocator, m.file_path) catch |err| switch (err) {
+            profile.FileError.NotFound => return,
+            else => return err,
         };
-        defer m.allocator.free(section);
+        defer m.allocator.free(data);
+        const span = try sectionSpan(m.allocator, data, name);
+        const found = span orelse return;
         const key = try m.allocator.dupe(u8, name);
         errdefer m.allocator.free(key);
-        const owned = try m.allocator.dupe(u8, section);
+        const owned = try m.allocator.dupe(u8, data[found.start..found.end]);
         errdefer m.allocator.free(owned);
         try m.entries.put(key, .{ .raw = owned, .registered = false });
     }
@@ -342,6 +344,290 @@ pub const Manager = struct {
         std.Io.Dir.renameAbsolute(m.file_path, backup, m.io) catch {};
     }
 };
+
+/// Byte span [start, end) of one JSON value inside its document.
+const Span = struct { start: usize, end: usize };
+
+const ScanError = error{ InvalidJson, TooDeep };
+
+/// sectionSpan: validate the whole state file (it must be one JSON
+/// object, like Go's map unmarshal) and return the original byte span
+/// of the named top-level section, or null when absent. The last
+/// duplicate wins, matching Go map unmarshal. Malformed documents are
+/// CorruptState, like loadStateFile reports them.
+fn sectionSpan(allocator: std.mem.Allocator, data: []const u8, name: []const u8) Error!?Span {
+    var pos: usize = 0;
+    skipWs(data, &pos);
+    if (pos >= data.len or data[pos] != '{') return Error.CorruptState;
+    pos += 1;
+    skipWs(data, &pos);
+    var found: ?Span = null;
+    if (pos < data.len and data[pos] == '}') {
+        pos += 1;
+    } else {
+        while (true) {
+            if (pos >= data.len or data[pos] != '"') return Error.CorruptState;
+            const key_start = pos;
+            skipString(data, &pos) catch return Error.CorruptState;
+            const key_raw = data[key_start..pos];
+            skipWs(data, &pos);
+            if (pos >= data.len or data[pos] != ':') return Error.CorruptState;
+            pos += 1;
+            skipWs(data, &pos);
+            const val_start = pos;
+            skipValue(data, &pos, 0) catch return Error.CorruptState;
+            const matches = decodeKeyEquals(allocator, key_raw, name) catch return Error.CorruptState;
+            if (matches) found = .{ .start = val_start, .end = pos };
+            skipWs(data, &pos);
+            if (pos >= data.len) return Error.CorruptState;
+            if (data[pos] == ',') {
+                pos += 1;
+                skipWs(data, &pos);
+                continue;
+            }
+            if (data[pos] == '}') {
+                pos += 1;
+                break;
+            }
+            return Error.CorruptState;
+        }
+    }
+    skipWs(data, &pos);
+    if (pos != data.len) return Error.CorruptState;
+    return found;
+}
+
+/// decodeKeyEquals: compare a quoted raw key span against a name the way
+/// Go map lookup does — escapes decoded (including \u with surrogate
+/// pairing, lone surrogates becoming U+FFFD), then byte-compared.
+fn decodeKeyEquals(allocator: std.mem.Allocator, quoted: []const u8, name: []const u8) Error!bool {
+    // Fast path: no escapes, direct compare of the inner bytes.
+    if (std.mem.indexOfScalar(u8, quoted, '\\') == null) {
+        return std.mem.eql(u8, quoted[1 .. quoted.len - 1], name);
+    }
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    var i: usize = 1; // skip opening quote; span already validated
+    while (i < quoted.len - 1) {
+        const c = quoted[i];
+        if (c != '\\') {
+            try out.append(allocator, c);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        switch (quoted[i]) {
+            '"', '\\', '/' => {
+                try out.append(allocator, quoted[i]);
+                i += 1;
+            },
+            'b' => {
+                try out.append(allocator, 0x08);
+                i += 1;
+            },
+            'f' => {
+                try out.append(allocator, 0x0c);
+                i += 1;
+            },
+            'n' => {
+                try out.append(allocator, '\n');
+                i += 1;
+            },
+            'r' => {
+                try out.append(allocator, '\r');
+                i += 1;
+            },
+            't' => {
+                try out.append(allocator, '\t');
+                i += 1;
+            },
+            'u' => {
+                i += 1;
+                var cp: u21 = 0;
+                for (0..4) |_| {
+                    cp = cp * 16 + hexVal(quoted[i]);
+                    i += 1;
+                }
+                // Surrogate pair like Go: high followed by \u low combines,
+                // anything else unpaired becomes U+FFFD.
+                if (cp >= 0xd800 and cp <= 0xdbff and
+                    i + 6 < quoted.len and quoted[i] == '\\' and quoted[i + 1] == 'u')
+                {
+                    var lo: u21 = 0;
+                    for (0..4) |k| lo = lo * 16 + hexVal(quoted[i + 2 + k]);
+                    if (lo >= 0xdc00 and lo <= 0xdfff) {
+                        cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00);
+                        i += 6;
+                    } else {
+                        cp = 0xfffd;
+                    }
+                } else if (cp >= 0xd800 and cp <= 0xdfff) {
+                    cp = 0xfffd;
+                }
+                var utf8: [4]u8 = undefined;
+                const n = std.unicode.utf8Encode(cp, &utf8) catch {
+                    try out.appendSlice(allocator, "\u{fffd}");
+                    continue;
+                };
+                try out.appendSlice(allocator, utf8[0..n]);
+            },
+            else => return Error.CorruptState, // unreachable: validated before
+        }
+    }
+    return std.mem.eql(u8, out.items, name);
+}
+
+fn hexVal(c: u8) u21 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => 0, // unreachable: validated before
+    };
+}
+
+/// Skip one JSON value; grammar mirrors Go encoding/json (strict
+/// numbers, strict escapes, duplicate members accepted, max depth
+/// 10000). pos starts past leading ws and ends past the value.
+fn skipValue(data: []const u8, pos: *usize, depth: u32) ScanError!void {
+    if (depth > 10000) return ScanError.TooDeep;
+    skipWs(data, pos);
+    if (pos.* >= data.len) return ScanError.InvalidJson;
+    switch (data[pos.*]) {
+        '{' => {
+            pos.* += 1;
+            skipWs(data, pos);
+            if (pos.* < data.len and data[pos.*] == '}') {
+                pos.* += 1;
+                return;
+            }
+            while (true) {
+                if (pos.* >= data.len or data[pos.*] != '"') return ScanError.InvalidJson;
+                try skipString(data, pos);
+                skipWs(data, pos);
+                if (pos.* >= data.len or data[pos.*] != ':') return ScanError.InvalidJson;
+                pos.* += 1;
+                try skipValue(data, pos, depth + 1);
+                skipWs(data, pos);
+                if (pos.* >= data.len) return ScanError.InvalidJson;
+                if (data[pos.*] == ',') {
+                    pos.* += 1;
+                    continue;
+                }
+                if (data[pos.*] == '}') {
+                    pos.* += 1;
+                    return;
+                }
+                return ScanError.InvalidJson;
+            }
+        },
+        '[' => {
+            pos.* += 1;
+            skipWs(data, pos);
+            if (pos.* < data.len and data[pos.*] == ']') {
+                pos.* += 1;
+                return;
+            }
+            while (true) {
+                try skipValue(data, pos, depth + 1);
+                skipWs(data, pos);
+                if (pos.* >= data.len) return ScanError.InvalidJson;
+                if (data[pos.*] == ',') {
+                    pos.* += 1;
+                    continue;
+                }
+                if (data[pos.*] == ']') {
+                    pos.* += 1;
+                    return;
+                }
+                return ScanError.InvalidJson;
+            }
+        },
+        '"' => try skipString(data, pos),
+        't' => try skipLiteral(data, pos, "true"),
+        'f' => try skipLiteral(data, pos, "false"),
+        'n' => try skipLiteral(data, pos, "null"),
+        '-', '0'...'9' => try skipNumber(data, pos),
+        else => return ScanError.InvalidJson,
+    }
+}
+
+fn skipWs(data: []const u8, pos: *usize) void {
+    while (pos.* < data.len) {
+        switch (data[pos.*]) {
+            ' ', '\t', '\n', '\r' => pos.* += 1,
+            else => return,
+        }
+    }
+}
+
+/// Strings: escapes validated; unescaped bytes below 0x20 rejected.
+/// Raw bytes 0x7f and up pass through like Go (no UTF-8 check in Valid).
+fn skipString(data: []const u8, pos: *usize) ScanError!void {
+    var i = pos.* + 1; // skip opening quote
+    while (i < data.len) {
+        const c = data[i];
+        if (c == '"') {
+            pos.* = i + 1;
+            return;
+        }
+        if (c == '\\') {
+            i += 1;
+            if (i >= data.len) return ScanError.InvalidJson;
+            switch (data[i]) {
+                '"', '\\', '/', 'b', 'f', 'n', 'r', 't' => i += 1,
+                'u' => {
+                    i += 1;
+                    for (0..4) |_| {
+                        if (i >= data.len or !isHexDigit(data[i])) return ScanError.InvalidJson;
+                        i += 1;
+                    }
+                },
+                else => return ScanError.InvalidJson,
+            }
+            continue;
+        }
+        if (c < 0x20) return ScanError.InvalidJson;
+        i += 1;
+    }
+    return ScanError.InvalidJson;
+}
+
+fn skipLiteral(data: []const u8, pos: *usize, word: []const u8) ScanError!void {
+    if (pos.* + word.len > data.len) return ScanError.InvalidJson;
+    if (!std.mem.eql(u8, data[pos.*..][0..word.len], word)) return ScanError.InvalidJson;
+    pos.* += word.len;
+}
+
+/// Go number grammar: -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?
+fn skipNumber(data: []const u8, pos: *usize) ScanError!void {
+    var i = pos.*;
+    if (i < data.len and data[i] == '-') i += 1;
+    if (i >= data.len) return ScanError.InvalidJson;
+    if (data[i] == '0') {
+        i += 1;
+    } else if (data[i] >= '1' and data[i] <= '9') {
+        while (i < data.len and data[i] >= '0' and data[i] <= '9') i += 1;
+    } else {
+        return ScanError.InvalidJson;
+    }
+    if (i < data.len and data[i] == '.') {
+        i += 1;
+        if (i >= data.len or data[i] < '0' or data[i] > '9') return ScanError.InvalidJson;
+        while (i < data.len and data[i] >= '0' and data[i] <= '9') i += 1;
+    }
+    if (i < data.len and (data[i] == 'e' or data[i] == 'E')) {
+        i += 1;
+        if (i < data.len and (data[i] == '+' or data[i] == '-')) i += 1;
+        if (i >= data.len or data[i] < '0' or data[i] > '9') return ScanError.InvalidJson;
+        while (i < data.len and data[i] >= '0' and data[i] <= '9') i += 1;
+    }
+    pos.* = i;
+}
+
+fn isHexDigit(c: u8) bool {
+    return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
+}
 
 /// Atomic byte write: temp file (0600) in the target dir + rename.
 /// Mirrors util.WriteBytesWithRestrictedPermission (MkdirAll 0750, 0600 file).
