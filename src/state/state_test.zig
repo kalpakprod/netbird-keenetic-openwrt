@@ -107,6 +107,58 @@ test "unregistered update is rejected" {
     try std.testing.expectError(state.Error.StateNotRegistered, m.delete("nope"));
 }
 
+test "oom during update keeps old state and stays usable" {
+    var fail = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var m = state.Manager.init(fail.allocator(), tio, "/tmp/nb-state-test-nope-oom/state.json");
+    defer m.deinit();
+    try m.register("a");
+    try m.updateRaw("a", "{\"v\":1}");
+    // fail the replacement dupe inside setRaw (delete calls it directly)
+    fail.fail_index = fail.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, m.delete("a"));
+    fail.fail_index = std.math.maxInt(usize);
+    // old raw intact
+    const V = struct { v: i64 };
+    var got = (try m.get("a", V)).?;
+    defer got.deinit();
+    try std.testing.expectEqual(@as(i64, 1), got.value.v);
+    // manager still usable (frees the live raw exactly once)
+    try m.updateRaw("a", "{\"v\":3}");
+    var got2 = (try m.get("a", V)).?;
+    defer got2.deinit();
+    try std.testing.expectEqual(@as(i64, 3), got2.value.v);
+}
+
+test "oom during dirty mark leaves entry unchanged and clean" {
+    const root = try scratchRoot(std.testing.allocator, "oomdirty");
+    defer std.testing.allocator.free(root);
+    defer cleanup(root);
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/state.json", .{root});
+    defer std.testing.allocator.free(path);
+
+    var fail = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var m = state.Manager.init(fail.allocator(), tio, path);
+    defer m.deinit();
+    try m.register("a");
+    try m.updateRaw("a", "{\"v\":1}");
+    try m.persist();
+    // fail the dirty-key dupe: replacement ok, markDirty errors
+    // (delete calls setRaw directly, so indices stay deterministic)
+    fail.fail_index = fail.alloc_index + 1;
+    try std.testing.expectError(error.OutOfMemory, m.delete("a"));
+    fail.fail_index = std.math.maxInt(usize);
+    // entry unchanged ...
+    const V = struct { v: i64 };
+    var got = (try m.get("a", V)).?;
+    defer got.deinit();
+    try std.testing.expectEqual(@as(i64, 1), got.value.v);
+    // ... and not dirty: persist rewrites nothing
+    try m.persist();
+    const data = try profile.readFileLseek(tio, std.testing.allocator, path);
+    defer std.testing.allocator.free(data);
+    try std.testing.expectEqualSlices(u8, "{\"a\":{\"v\":1}}", data);
+}
+
 test "deleteByName needs the name in the file" {
     const root = try scratchRoot(std.testing.allocator, "delbyname");
     defer std.testing.allocator.free(root);
