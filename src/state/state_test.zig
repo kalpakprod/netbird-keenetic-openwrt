@@ -290,3 +290,30 @@ test "cleanup flow preserves unregistered sections" {
     defer std.testing.allocator.free(data2);
     try std.testing.expectEqualSlices(u8, data, data2);
 }
+
+test "preserveRaw keeps raw decimals byte-exact" {
+    const root = try scratchRoot(std.testing.allocator, "rawdec");
+    defer std.testing.allocator.free(root);
+    defer cleanup(root);
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/state.json", .{root});
+    defer std.testing.allocator.free(path);
+    try std.Io.Dir.createDirAbsolute(tio, root, @enumFromInt(0o750));
+
+    const raw = "{\"mystery\":{\"n\":0.12345678901234567890123456789}}";
+    {
+        const file = try std.Io.Dir.createFileAbsolute(tio, path, .{ .exclusive = true, .permissions = @enumFromInt(0o600) });
+        defer file.close(tio);
+        try file.writePositionalAll(tio, raw, 0);
+    }
+
+    var m = state.Manager.init(std.testing.allocator, tio, path);
+    defer m.deinit();
+    try m.preserveRaw("mystery");
+    try m.register("known");
+    try m.updateRaw("known", "null");
+    try m.persist();
+
+    const data = try profile.readFileLseek(tio, std.testing.allocator, path);
+    defer std.testing.allocator.free(data);
+    try std.testing.expectEqualSlices(u8, "{\"known\":null,\"mystery\":{\"n\":0.12345678901234567890123456789}}", data);
+}
