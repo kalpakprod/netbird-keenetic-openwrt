@@ -1,4 +1,4 @@
-// Port of golang.org/x/net/http2 frame codec (BSD-3-Clause).
+// Port of golang.org/x/net/http2 frame codec (v0.79.0 vendored copy, BSD-3-Clause).
 // Reference: upstream/netbird/vendor/golang.org/x/net/http2/frame.go,
 // errors.go (ErrCode), http2.go (SettingID, defaults).
 // Scope: frame reader/writer over caller slices for DATA, HEADERS,
@@ -265,13 +265,16 @@ fn parseHeaders(header: Header, payload: []const u8) ParseResult {
     var p = payload;
     var pad: usize = 0;
     if (header.hasFlags(flag_headers_padded)) {
-        if (p.len == 0) return streamErr(Error.Protocol, header.stream_id);
+        // Missing mandatory Pad Length: terminal read error in Go, RFC 7540
+        // §4.2 FRAME_SIZE_ERROR, connection scope.
+        if (p.len == 0) return connErr(Error.FrameSize, header.stream_id);
         pad = p[0];
         p = p[1..];
     }
     var f = Headers{ .header = header, .fragment = &.{} };
     if (header.hasFlags(flag_headers_priority)) {
-        if (p.len < 5) return streamErr(Error.Protocol, header.stream_id);
+        // Short priority fields: same terminal class as above.
+        if (p.len < 5) return connErr(Error.FrameSize, header.stream_id);
         const v = std.mem.readInt(u32, p[0..4], .big);
         f.priority_stream_dep = v & 0x7fffffff;
         f.priority_exclusive = v != f.priority_stream_dep;

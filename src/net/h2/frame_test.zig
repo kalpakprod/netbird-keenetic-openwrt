@@ -235,6 +235,21 @@ test "frame validation errors" {
     h = frame.Header{ .length = 2, .type = .data, .flags = frame.flag_data_padded, .stream_id = 1 };
     r = frame.parse(h, &[_]u8{ 5, 0xaa });
     try std.testing.expectEqual(frame.Error.Protocol, r.err.err);
+    // HEADERS+PADDED with no Pad Length byte: FRAME_SIZE_ERROR, connection
+    h = frame.Header{ .length = 0, .type = .headers, .flags = frame.flag_headers_padded, .stream_id = 1 };
+    r = frame.parse(h, &[_]u8{});
+    try std.testing.expectEqual(frame.Error.FrameSize, r.err.err);
+    try std.testing.expectEqual(frame.Scope.connection, r.err.scope);
+    // HEADERS+PRIORITY with short priority fields: FRAME_SIZE_ERROR, connection
+    h = frame.Header{ .length = 3, .type = .headers, .flags = frame.flag_headers_priority, .stream_id = 1 };
+    r = frame.parse(h, &[_]u8{ 1, 2, 3 });
+    try std.testing.expectEqual(frame.Error.FrameSize, r.err.err);
+    try std.testing.expectEqual(frame.Scope.connection, r.err.scope);
+    // HEADERS pad longer than rest stays a stream error (Go streamError)
+    h = frame.Header{ .length = 2, .type = .headers, .flags = frame.flag_headers_padded, .stream_id = 1 };
+    r = frame.parse(h, &[_]u8{ 5, 0x82 });
+    try std.testing.expectEqual(frame.Error.Protocol, r.err.err);
+    try std.testing.expectEqual(frame.Scope.stream, r.err.scope);
     // window update zero increment on connection vs stream scope
     h = frame.Header{ .length = 4, .type = .window_update, .flags = 0, .stream_id = 0 };
     r = frame.parse(h, &[_]u8{ 0, 0, 0, 0 });
