@@ -299,3 +299,26 @@ test "varint edges" {
     const r2 = try hpack.readVarInt(5, out[0..n]);
     try std.testing.expectEqual((1 << 60) + 12345, r2.value);
 }
+
+test "indexed name survives eviction of its own entry" {
+    // Table size 72 fits exactly aaa:x and bbb:y (36 each). The third field
+    // reuses name aaa with incremental indexing; adding it evicts aaa:x
+    // itself, compacting the arena the borrowed name points into.
+    var d = hpack.Decoder.init(72);
+    var col = Collector{};
+    const ctx: ?*anyopaque = @ptrCast(&col);
+    // literal incremental, new name "aaa"="x"
+    const b1 = [_]u8{ 0x40, 0x03, 'a', 'a', 'a', 0x01, 'x' };
+    try d.decodeBlock(&b1, ctx, Collector.emitFn);
+    try col.check(&[_][]const u8{"aaa"}, &[_][]const u8{"x"});
+    // literal incremental, new name "bbb"="y"
+    col.len = 0;
+    const b2 = [_]u8{ 0x40, 0x03, 'b', 'b', 'b', 0x01, 'y' };
+    try d.decodeBlock(&b2, ctx, Collector.emitFn);
+    try col.check(&[_][]const u8{"bbb"}, &[_][]const u8{"y"});
+    // literal incremental, indexed name 63 (aaa), value "z": 7f00017a
+    col.len = 0;
+    const b3 = [_]u8{ 0x7f, 0x00, 0x01, 'z' };
+    try d.decodeBlock(&b3, ctx, Collector.emitFn);
+    try col.check(&[_][]const u8{"aaa"}, &[_][]const u8{"z"});
+}

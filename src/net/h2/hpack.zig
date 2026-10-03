@@ -459,9 +459,10 @@ pub const DecodedString = struct {
 };
 
 /// HPACK decoder over one connection. Decoded strings borrow the input
-/// (raw) or an internal scratch buffer (huffman); dynamic entries own
-/// arena copies. Decoded field slices stay valid until the next
-/// decodeBlock call on the same decoder.
+/// (raw), the static table, or an internal scratch buffer (huffman and
+/// indexed names under incremental indexing); dynamic entries own arena
+/// copies. Decoded field slices stay valid until the next decodeBlock
+/// call on the same decoder.
 pub const Decoder = struct {
     dyn_tab: DynamicTable = DynamicTable.init(initial_header_table_size),
     allowed_max_size: u32 = initial_header_table_size,
@@ -536,6 +537,18 @@ pub const Decoder = struct {
         const vs = try d.readString(buf[pos..]);
         pos += vs.len;
         if (indexing == .incremental) {
+            // A table-borrowed name dangles if add() evicts and compacts its
+            // own entry (Go is immune: strings are GC'd). Copy it to the
+            // per-block scratch first; values are safe (block or scratch).
+            if (r.value > 0) {
+                if (d.scratch_used + name.len > d.scratch.len) {
+                    return Error.StringTooLong;
+                }
+                const out = d.scratch[d.scratch_used..][0..name.len];
+                @memcpy(out, name);
+                d.scratch_used += name.len;
+                name = out;
+            }
             try d.dyn_tab.add(name, vs.bytes);
         }
         emit(context, .{
