@@ -1,11 +1,13 @@
-// Port of golang.org/x/net/http2 client connection behavior (BSD-3-Clause).
+// Port of golang.org/x/net/http2 client connection behavior (v0.79.0 vendored copy, BSD-3-Clause).
 // Reference: upstream/netbird/vendor/golang.org/x/net/http2/transport.go
 // (handshake, readLoop), frame.go (sequencing).
 // Scope: single-threaded blocking H2 client: preface + SETTINGS handshake,
 // CONTINUATION reassembly with sequencing checks, HPACK decode of response
 // and trailer blocks, connection/stream flow-control accounting, PING ack,
-// GOAWAY/RST handling. No server push, no priority, no padding on write,
-// no automatic receive-window top-up (caller sends WINDOW_UPDATE explicitly).
+// GOAWAY/RST handling. No server push, no priority, no padding on write.
+// Receive DATA top-up is manual (caller sends WINDOW_UPDATE explicitly);
+// only DATA padding is refunded automatically like Go (transport.go:2335),
+// since the app never sees those bytes.
 
 const std = @import("std");
 const frame = @import("frame.zig");
@@ -63,6 +65,7 @@ pub const StreamState = enum {
     idle,
     open,
     half_closed_remote,
+    half_closed_local,
     closed,
 };
 
@@ -199,8 +202,10 @@ pub const Conn = struct {
             const st = s.setting(i);
             switch (st.id) {
                 .header_table_size => {
+                    // Go transport.go:2518-2519: the public setter schedules
+                    // the HPACK Dynamic Table Size Update on the next block.
                     c.peer_header_table_size = st.val;
-                    c.encoder.dyn_tab.setMaxSize(st.val);
+                    c.encoder.setMaxDynamicTableSize(st.val);
                 },
                 .enable_push => {
                     if (st.val != 0) return Error.Protocol;
@@ -211,7 +216,9 @@ pub const Conn = struct {
                     const delta: i64 = @as(i64, st.val) - c.peer_initial_window;
                     c.peer_initial_window = st.val;
                     for (&c.streams) |*sm| {
-                        if (sm.state == .open or sm.state == .half_closed_remote) {
+                        if (sm.state == .open or sm.state == .half_closed_remote or
+                            sm.state == .half_closed_local)
+                        {
                             sm.send_window += delta;
                         }
                     }
@@ -239,7 +246,16 @@ pub const Conn = struct {
         try c.writeRaw(w.bytes());
     }
 
+    fn activeCount(c: *Conn) u32 {
+        var n: u32 = 0;
+        for (&c.streams) |*sm| {
+            if (sm.state != .idle and sm.state != .closed) n += 1;
+        }
+        return n;
+    }
+
     fn allocStream(c: *Conn) Error!*Stream {
+        if (c.activeCount() >= c.peer_max_concurrent) return Error.NoStreamsLeft;
         for (&c.streams) |*sm| {
             if (sm.state == .idle or sm.state == .closed) {
                 sm.* = .{
@@ -257,11 +273,22 @@ pub const Conn = struct {
 
     fn findStream(c: *Conn, id: u32) ?*Stream {
         for (&c.streams) |*sm| {
-            if ((sm.state == .open or sm.state == .half_closed_remote) and sm.id == id) {
+            if (sm.state != .idle and sm.state != .closed and sm.id == id) {
                 return sm;
             }
         }
         return null;
+    }
+
+    /// Local END_STREAM sent: open -> half_closed_local, remote already
+    /// done -> closed (RFC 7540 5.1).
+    fn localEnd(sm: *Stream) void {
+        sm.state = if (sm.state == .half_closed_remote) .closed else .half_closed_local;
+    }
+
+    /// Remote END_STREAM received: mirror direction.
+    fn remoteEnd(sm: *Stream) void {
+        sm.state = if (sm.state == .half_closed_local) .closed else .half_closed_remote;
     }
 
     /// Open a stream and send request headers, fragmenting the HPACK
@@ -285,7 +312,9 @@ pub const Conn = struct {
             const last = off + chunk_len == blen;
             var w = frame.Writer.init(&c.write_buf);
             if (first) {
-                try w.writeHeaders(sm.id, block[off..][0..chunk_len], end_stream and last, last, 0);
+                // Go transport.go:1423: END_STREAM rides the first HEADERS
+                // even when CONTINUATIONs follow (RFC 7540 6.2).
+                try w.writeHeaders(sm.id, block[off..][0..chunk_len], end_stream, last, 0);
             } else {
                 try w.writeContinuation(sm.id, last, block[off..][0..chunk_len]);
             }
@@ -294,13 +323,18 @@ pub const Conn = struct {
             first = false;
             if (last) break;
         }
+        if (end_stream) localEnd(sm);
         return sm.id;
     }
 
     /// Send DATA on a stream, honoring both flow-control windows.
     pub fn writeData(c: *Conn, stream_id: u32, data: []const u8, end_stream: bool) Error!void {
         const sm = c.findStream(stream_id) orelse return Error.StreamClosed;
-        if (sm.state != .open) return Error.StreamClosed;
+        // Remote END_STREAM does not block local sends (RFC 7540 5.1
+        // half-closed(remote)); only our own END_STREAM does.
+        if (sm.state != .open and sm.state != .half_closed_remote) {
+            return Error.StreamClosed;
+        }
         // All-or-nothing: refuse before writing a partial frame.
         if (@as(i64, @intCast(data.len)) > sm.send_window) return Error.FlowControl;
         if (@as(i64, @intCast(data.len)) > c.conn_send_window) return Error.FlowControl;
@@ -318,6 +352,7 @@ pub const Conn = struct {
             off += chunk;
             if (data.len == 0) break;
         }
+        if (end_stream) localEnd(sm);
     }
 
     /// Explicitly grow the receive windows (no automatic top-up).
@@ -424,16 +459,32 @@ pub const Conn = struct {
     fn onData(c: *Conn, d: frame.Data) Error!?Event {
         const sm = c.findStream(d.header.stream_id) orelse return Error.StreamClosed;
         if (sm.state == .half_closed_remote) return Error.StreamClosed;
-        if (@as(i64, @intCast(d.data.len)) > sm.recv_window) return Error.FlowControl;
-        if (@as(i64, @intCast(d.data.len)) > c.conn_recv_window) return Error.FlowControl;
-        sm.recv_window -= @intCast(d.data.len);
-        c.conn_recv_window -= @intCast(d.data.len);
+        // Flow control counts the whole payload incl. padding (RFC 7540
+        // 6.9, Go transport.go:2328 takeInflows(f.Length)).
+        const full: i64 = d.header.length;
+        if (full > sm.recv_window) return Error.FlowControl;
+        if (full > c.conn_recv_window) return Error.FlowControl;
+        sm.recv_window -= full;
+        c.conn_recv_window -= full;
         const end = d.header.hasFlags(frame.flag_data_end_stream);
-        if (end) sm.state = .half_closed_remote;
+        if (end) remoteEnd(sm);
         // Copy out of the shared buffer: the event must survive the call.
         const kept = c.frag_buf[0..d.data.len];
         @memcpy(kept, d.data);
-        return Event{ .data = .{ .stream_id = d.header.stream_id, .end_stream = end, .bytes = kept } };
+        const sid = d.header.stream_id;
+        // Go transport.go:2335 refunds padding immediately: the app never
+        // sees those bytes, so DATA top-up stays fully manual. Credit the
+        // stream window directly: the frame may have closed the stream,
+        // and sendWindowUpdate skips unknown streams.
+        const pad: u32 = d.header.length - @as(u32, @intCast(d.data.len));
+        if (pad > 0) {
+            var w = frame.Writer.init(&c.write_buf);
+            try w.writeWindowUpdate(sid, pad);
+            try c.writeRaw(w.bytes());
+            sm.recv_window += pad;
+            try c.sendWindowUpdate(0, pad);
+        }
+        return Event{ .data = .{ .stream_id = sid, .end_stream = end, .bytes = kept } };
     }
 
     fn onHeaders(c: *Conn, hd: frame.Headers, stream_id: u32) Error!?Event {
@@ -490,7 +541,7 @@ pub const Conn = struct {
             };
         };
         if (ctx.dropped) return Error.MessageTooLong;
-        if (end_stream) sm.state = .half_closed_remote;
+        if (end_stream) remoteEnd(sm);
         const fields = c.fields_buf[0..ctx.len];
         if (is_trailers) {
             return Event{ .trailers = .{ .stream_id = stream_id, .end_stream = end_stream, .fields = fields } };

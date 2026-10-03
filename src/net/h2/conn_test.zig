@@ -314,3 +314,172 @@ test "settings apply and rst/goaway handling" {
     try std.testing.expectEqual(@as(u32, 1), ev3.goaway.last_stream_id);
     try std.testing.expectError(conn.Error.RefusedStream, c.writeHeaders(&[_]hpack.HeaderField{.{ .name = ":method", .value = "POST" }}, false));
 }
+
+test "peer table size change emits HPACK size update" {
+    const alloc = std.testing.allocator;
+    const srv_settings = try bytesOf(alloc, "SRV_SETTINGS");
+    defer alloc.free(srv_settings);
+    var pipe = Pipe{ .inbound = srv_settings };
+    var c = conn.Conn.init(pipe.transport());
+    try c.handshake();
+    // server shrinks table to 0
+    const f_set = try frameBytes(alloc, .settings, 0, 0, &[_]u8{ 0, 1, 0, 0, 0, 0 });
+    defer alloc.free(f_set);
+    var pipe2 = Pipe{ .inbound = f_set };
+    c.transport = pipe2.transport();
+    _ = try c.readNext();
+    try std.testing.expectEqual(@as(u32, 0), c.peer_header_table_size);
+    // next block must start with a Dynamic Table Size Update (0x20)
+    var pipe3 = Pipe{ .inbound = &.{} };
+    c.transport = pipe3.transport();
+    _ = try c.writeHeaders(&[_]hpack.HeaderField{.{ .name = ":method", .value = "POST" }}, false);
+    const hh = frame.Header.parse(pipe3.outbound[0..frame.header_len]);
+    try std.testing.expectEqual(frame.FrameType.headers, hh.type);
+    try std.testing.expectEqual(@as(u8, 0x20), pipe3.outbound[frame.header_len]);
+}
+
+test "completed requests free their slots" {
+    const alloc = std.testing.allocator;
+    const srv_settings = try bytesOf(alloc, "SRV_SETTINGS");
+    defer alloc.free(srv_settings);
+    var pipe = Pipe{ .inbound = srv_settings };
+    var c = conn.Conn.init(pipe.transport());
+    try c.handshake();
+    // 9 sequential fully-completed requests on 8 slots
+    var i: u32 = 0;
+    while (i < 9) : (i += 1) {
+        var wp = Pipe{ .inbound = &.{} };
+        c.transport = wp.transport();
+        const sid = try c.writeHeaders(&[_]hpack.HeaderField{.{ .name = ":method", .value = "GET" }}, true);
+        try std.testing.expectEqual(@as(u32, 1 + 2 * i), sid);
+        const f_resp = try frameBytes(alloc, .headers, frame.flag_headers_end_headers | frame.flag_headers_end_stream, sid, &[_]u8{0x88});
+        defer alloc.free(f_resp);
+        var rp = Pipe{ .inbound = f_resp };
+        c.transport = rp.transport();
+        const ev = (try c.readNext()).?;
+        try std.testing.expect(ev.response_headers.end_stream);
+    }
+    // and a tenth still fits
+    var wp = Pipe{ .inbound = &.{} };
+    c.transport = wp.transport();
+    _ = try c.writeHeaders(&[_]hpack.HeaderField{.{ .name = ":method", .value = "GET" }}, true);
+}
+
+test "data direction rules follow both ends" {
+    const alloc = std.testing.allocator;
+    const srv_settings = try bytesOf(alloc, "SRV_SETTINGS");
+    defer alloc.free(srv_settings);
+    var pipe = Pipe{ .inbound = srv_settings };
+    var c = conn.Conn.init(pipe.transport());
+    try c.handshake();
+    var wp = Pipe{ .inbound = &.{} };
+    c.transport = wp.transport();
+    _ = try c.writeHeaders(&[_]hpack.HeaderField{.{ .name = ":method", .value = "POST" }}, false);
+    // remote END_STREAM arrives: local send still allowed (RFC 7540 5.1)
+    const f_resp = try frameBytes(alloc, .headers, frame.flag_headers_end_headers | frame.flag_headers_end_stream, 1, &[_]u8{0x88});
+    defer alloc.free(f_resp);
+    var rp = Pipe{ .inbound = f_resp };
+    c.transport = rp.transport();
+    _ = try c.readNext();
+    var wp2 = Pipe{ .inbound = &.{} };
+    c.transport = wp2.transport();
+    try c.writeData(1, "still-open-locally", false);
+    // local END_STREAM forbids further local DATA
+    _ = try c.writeHeaders(&[_]hpack.HeaderField{.{ .name = ":method", .value = "POST" }}, true);
+    try std.testing.expectError(conn.Error.StreamClosed, c.writeData(3, "x", false));
+}
+
+test "fragmented headers carry end stream on first frame" {
+    const alloc = std.testing.allocator;
+    const srv_settings = try bytesOf(alloc, "SRV_SETTINGS");
+    defer alloc.free(srv_settings);
+    var pipe = Pipe{ .inbound = srv_settings };
+    var c = conn.Conn.init(pipe.transport());
+    try c.handshake();
+    c.peer_max_frame_size = 64;
+    var big_val: [300]u8 = undefined;
+    @memset(&big_val, 'y');
+    var pipe3 = Pipe{ .inbound = &.{} };
+    c.transport = pipe3.transport();
+    _ = try c.writeHeaders(&[_]hpack.HeaderField{.{ .name = "x-big", .value = &big_val }}, true);
+    const h1 = frame.Header.parse(pipe3.outbound[0..frame.header_len]);
+    try std.testing.expectEqual(frame.FrameType.headers, h1.type);
+    try std.testing.expect(h1.hasFlags(frame.flag_headers_end_stream));
+    try std.testing.expect(!h1.hasFlags(frame.flag_headers_end_headers));
+}
+
+test "flow control counts padding then refunds it" {
+    const alloc = std.testing.allocator;
+    const srv_settings = try bytesOf(alloc, "SRV_SETTINGS");
+    defer alloc.free(srv_settings);
+    const resp_headers = try bytesOf(alloc, "RESP_HEADERS");
+    defer alloc.free(resp_headers);
+    const f_resp = try frameBytes(alloc, .headers, frame.flag_headers_end_headers, 1, resp_headers);
+    defer alloc.free(f_resp);
+    // padded DATA: padlen byte + "abcd" + 2 pad bytes = 7 total, pad = 3
+    const f_data = try frameBytes(alloc, .data, frame.flag_data_padded, 1, &[_]u8{ 2, 'a', 'b', 'c', 'd', 0, 0 });
+    defer alloc.free(f_data);
+    var inbound: [2048]u8 = undefined;
+    var ilen: usize = 0;
+    for ([_][]const u8{ srv_settings, f_resp, f_data }) |b| {
+        @memcpy(inbound[ilen..][0..b.len], b);
+        ilen += b.len;
+    }
+    var pipe = Pipe{ .inbound = inbound[0..ilen] };
+    var c = conn.Conn.init(pipe.transport());
+    try c.handshake();
+    const out_before = pipe.out_len;
+    _ = try c.writeHeaders(&[_]hpack.HeaderField{.{ .name = ":method", .value = "POST" }}, false);
+    _ = try c.readNext();
+    const out_after_req = pipe.out_len;
+    _ = try c.readNext();
+    // debited 7, padding 3 refunded: net 4
+    try std.testing.expectEqual(@as(i64, 65535 - 4), c.conn_recv_window);
+    // two WINDOW_UPDATE frames (stream 1 and connection), increment 3 each
+    var seen_stream = false;
+    var seen_conn = false;
+    var off = out_after_req;
+    _ = out_before;
+    var nframes: usize = 0;
+    while (off < pipe.out_len) : (nframes += 1) {
+        const wh = frame.Header.parse(pipe.outbound[off..][0..frame.header_len]);
+        try std.testing.expectEqual(frame.FrameType.window_update, wh.type);
+        try std.testing.expectEqual(@as(u32, 4), wh.length);
+        const incr = std.mem.readInt(u32, pipe.outbound[off + frame.header_len ..][0..4], .big);
+        try std.testing.expectEqual(@as(u32, 3), incr);
+        if (wh.stream_id == 1) seen_stream = true;
+        if (wh.stream_id == 0) seen_conn = true;
+        off += frame.header_len + 4;
+    }
+    try std.testing.expectEqual(@as(usize, 2), nframes);
+    try std.testing.expect(seen_stream and seen_conn);
+}
+
+test "peer max concurrent streams enforced" {
+    const alloc = std.testing.allocator;
+    const srv_settings = try bytesOf(alloc, "SRV_SETTINGS");
+    defer alloc.free(srv_settings);
+    var pipe = Pipe{ .inbound = srv_settings };
+    var c = conn.Conn.init(pipe.transport());
+    try c.handshake();
+    // server allows a single concurrent stream
+    const f_set = try frameBytes(alloc, .settings, 0, 0, &[_]u8{ 0, 3, 0, 0, 0, 1 });
+    defer alloc.free(f_set);
+    var pipe2 = Pipe{ .inbound = f_set };
+    c.transport = pipe2.transport();
+    _ = try c.readNext();
+    try std.testing.expectEqual(@as(u32, 1), c.peer_max_concurrent);
+    var wp = Pipe{ .inbound = &.{} };
+    c.transport = wp.transport();
+    _ = try c.writeHeaders(&[_]hpack.HeaderField{.{ .name = ":method", .value = "GET" }}, true);
+    try std.testing.expectError(conn.Error.NoStreamsLeft, c.writeHeaders(&[_]hpack.HeaderField{.{ .name = ":method", .value = "GET" }}, true));
+    // completing the first frees the slot
+    const f_resp = try frameBytes(alloc, .headers, frame.flag_headers_end_headers | frame.flag_headers_end_stream, 1, &[_]u8{0x88});
+    defer alloc.free(f_resp);
+    var rp = Pipe{ .inbound = f_resp };
+    c.transport = rp.transport();
+    _ = try c.readNext();
+    var wp2 = Pipe{ .inbound = &.{} };
+    c.transport = wp2.transport();
+    _ = try c.writeHeaders(&[_]hpack.HeaderField{.{ .name = ":method", .value = "GET" }}, true);
+}
