@@ -167,9 +167,37 @@ pub fn dataplaneMarkOut(buf: [][]const u8, iface: []const u8) []const []const u8
     return buf[0..10];
 }
 
+pub const ipv4_tcp_header_size: u16 = 40;
+pub const ipv6_tcp_header_size: u16 = 60;
+
+/// MSS clamp rule for NETBIRD-RT-MSSCLAMP (addMSSClampingRules):
+/// -o <iface> -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss <mtu-40/60>.
+/// The MSS text is formatted into the caller-provided val buffer.
+pub fn mssClamp(
+    buf: [][]const u8,
+    val: []u8,
+    iface: []const u8,
+    mtu: u16,
+    v6: bool,
+) []const []const u8 {
+    const overhead = if (v6) ipv6_tcp_header_size else ipv4_tcp_header_size;
+    const mss = mtu - overhead;
+    const text = std.fmt.bufPrint(val, "{d}", .{mss}) catch unreachable;
+    buf[0] = "-o";
+    buf[1] = iface;
+    buf[2] = "-p";
+    buf[3] = "tcp";
+    buf[4] = "--tcp-flags";
+    buf[5] = "SYN,RST";
+    buf[6] = "SYN";
+    buf[7] = "-j";
+    buf[8] = "TCPMSS";
+    buf[9] = "--set-mss";
+    buf[10] = text;
+    return buf[0..11];
+}
+
 /// Static NAT masquerade rules for NETBIRD-RT-NAT (addPostroutingRules).
-/// Installed by nat.setupRouting (step 3), declared here with the rest
-/// of the static specs.
 pub fn natMasqueradeOut(buf: [][]const u8) []const []const u8 {
     buf[0] = "-m";
     buf[1] = "mark";
