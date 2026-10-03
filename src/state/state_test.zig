@@ -155,6 +155,32 @@ test "updateRaw rejects malformed JSON" {
     try std.testing.expectEqualSlices(u8, "{\"x\":{\"ok\":true}}", data);
 }
 
+test "updateRaw accepts duplicate member names like Go RawMessage" {
+    const root = try scratchRoot(std.testing.allocator, "dupraw");
+    defer std.testing.allocator.free(root);
+    defer cleanup(root);
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/state.json", .{root});
+    defer std.testing.allocator.free(path);
+
+    var m = state.Manager.init(std.testing.allocator, tio, path);
+    defer m.deinit();
+    try m.register("x");
+    // Go json.Valid accepts duplicates; the bytes are kept verbatim.
+    try m.updateRaw("x", "{\"a\":1,\"a\":2}");
+    try m.persist();
+    const data = try profile.readFileLseek(tio, std.testing.allocator, path);
+    defer std.testing.allocator.free(data);
+    try std.testing.expectEqualSlices(u8, "{\"x\":{\"a\":1,\"a\":2}}", data);
+    // Malformed input is still rejected and leaves state untouched.
+    try std.testing.expectError(profile.FileError.InvalidJson, m.updateRaw("x", "{\"a\":1"));
+    try std.testing.expectError(profile.FileError.InvalidJson, m.updateRaw("x", "{\"a\":1} trailing"));
+    try std.testing.expectError(profile.FileError.InvalidJson, m.updateRaw("x", ""));
+    try m.persist();
+    const data2 = try profile.readFileLseek(tio, std.testing.allocator, path);
+    defer std.testing.allocator.free(data2);
+    try std.testing.expectEqualSlices(u8, data, data2);
+}
+
 test "deleteAll counts file states" {
     const root = try scratchRoot(std.testing.allocator, "delall");
     defer std.testing.allocator.free(root);

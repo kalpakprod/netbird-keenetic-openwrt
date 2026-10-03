@@ -91,13 +91,12 @@ pub const Manager = struct {
 
     /// Update a state from already-encoded JSON (RawState equivalent).
     /// Rejects malformed JSON like Go's json.Marshal check, before any
-    /// mutation, so the entry, dirty set and file stay untouched.
+    /// mutation, so the entry, dirty set and file stay untouched. The
+    /// original bytes are kept (never re-serialized), and duplicate
+    /// member names are accepted like Go json.Valid accepts them.
     pub fn updateRaw(m: *Manager, name: []const u8, raw_json: []const u8) Error!void {
         if (!m.entries.contains(name)) return Error.StateNotRegistered;
-        var check = std.json.parseFromSlice(std.json.Value, m.allocator, raw_json, .{}) catch {
-            return profile.FileError.InvalidJson;
-        };
-        check.deinit();
+        if (!jsonValid(raw_json)) return profile.FileError.InvalidJson;
         try m.setRaw(name, raw_json);
     }
 
@@ -325,6 +324,162 @@ pub const Manager = struct {
         std.Io.Dir.renameAbsolute(m.file_path, backup, m.io) catch {};
     }
 };
+
+const ScanError = error{ InvalidJson, TooDeep };
+
+/// jsonValid: Go encoding/json Valid equivalent. Strict JSON grammar
+/// over one complete value (no trailing data), duplicate member names
+/// accepted, zero allocations (an OOM during validation can never
+/// misreport valid input as InvalidJson).
+fn jsonValid(data: []const u8) bool {
+    var pos: usize = 0;
+    skipValue(data, &pos, 0) catch return false;
+    skipWs(data, &pos);
+    return pos == data.len;
+}
+
+/// Skip one JSON value; grammar mirrors Go encoding/json (strict
+/// numbers, strict escapes, duplicate members accepted, max depth
+/// 10000). pos starts past leading ws and ends past the value.
+fn skipValue(data: []const u8, pos: *usize, depth: u32) ScanError!void {
+    if (depth > 10000) return ScanError.TooDeep;
+    skipWs(data, pos);
+    if (pos.* >= data.len) return ScanError.InvalidJson;
+    switch (data[pos.*]) {
+        '{' => {
+            pos.* += 1;
+            skipWs(data, pos);
+            if (pos.* < data.len and data[pos.*] == '}') {
+                pos.* += 1;
+                return;
+            }
+            while (true) {
+                if (pos.* >= data.len or data[pos.*] != '"') return ScanError.InvalidJson;
+                try skipString(data, pos);
+                skipWs(data, pos);
+                if (pos.* >= data.len or data[pos.*] != ':') return ScanError.InvalidJson;
+                pos.* += 1;
+                try skipValue(data, pos, depth + 1);
+                skipWs(data, pos);
+                if (pos.* >= data.len) return ScanError.InvalidJson;
+                if (data[pos.*] == ',') {
+                    pos.* += 1;
+                    continue;
+                }
+                if (data[pos.*] == '}') {
+                    pos.* += 1;
+                    return;
+                }
+                return ScanError.InvalidJson;
+            }
+        },
+        '[' => {
+            pos.* += 1;
+            skipWs(data, pos);
+            if (pos.* < data.len and data[pos.*] == ']') {
+                pos.* += 1;
+                return;
+            }
+            while (true) {
+                try skipValue(data, pos, depth + 1);
+                skipWs(data, pos);
+                if (pos.* >= data.len) return ScanError.InvalidJson;
+                if (data[pos.*] == ',') {
+                    pos.* += 1;
+                    continue;
+                }
+                if (data[pos.*] == ']') {
+                    pos.* += 1;
+                    return;
+                }
+                return ScanError.InvalidJson;
+            }
+        },
+        '"' => try skipString(data, pos),
+        't' => try skipLiteral(data, pos, "true"),
+        'f' => try skipLiteral(data, pos, "false"),
+        'n' => try skipLiteral(data, pos, "null"),
+        '-', '0'...'9' => try skipNumber(data, pos),
+        else => return ScanError.InvalidJson,
+    }
+}
+
+fn skipWs(data: []const u8, pos: *usize) void {
+    while (pos.* < data.len) {
+        switch (data[pos.*]) {
+            ' ', '\t', '\n', '\r' => pos.* += 1,
+            else => return,
+        }
+    }
+}
+
+/// Strings: escapes validated; unescaped bytes below 0x20 rejected.
+/// Raw bytes 0x7f and up pass through like Go (no UTF-8 check in Valid).
+fn skipString(data: []const u8, pos: *usize) ScanError!void {
+    var i = pos.* + 1; // skip opening quote
+    while (i < data.len) {
+        const c = data[i];
+        if (c == '"') {
+            pos.* = i + 1;
+            return;
+        }
+        if (c == '\\') {
+            i += 1;
+            if (i >= data.len) return ScanError.InvalidJson;
+            switch (data[i]) {
+                '"', '\\', '/', 'b', 'f', 'n', 'r', 't' => i += 1,
+                'u' => {
+                    i += 1;
+                    for (0..4) |_| {
+                        if (i >= data.len or !isHexDigit(data[i])) return ScanError.InvalidJson;
+                        i += 1;
+                    }
+                },
+                else => return ScanError.InvalidJson,
+            }
+            continue;
+        }
+        if (c < 0x20) return ScanError.InvalidJson;
+        i += 1;
+    }
+    return ScanError.InvalidJson;
+}
+
+fn skipLiteral(data: []const u8, pos: *usize, word: []const u8) ScanError!void {
+    if (pos.* + word.len > data.len) return ScanError.InvalidJson;
+    if (!std.mem.eql(u8, data[pos.*..][0..word.len], word)) return ScanError.InvalidJson;
+    pos.* += word.len;
+}
+
+/// Go number grammar: -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?
+fn skipNumber(data: []const u8, pos: *usize) ScanError!void {
+    var i = pos.*;
+    if (i < data.len and data[i] == '-') i += 1;
+    if (i >= data.len) return ScanError.InvalidJson;
+    if (data[i] == '0') {
+        i += 1;
+    } else if (data[i] >= '1' and data[i] <= '9') {
+        while (i < data.len and data[i] >= '0' and data[i] <= '9') i += 1;
+    } else {
+        return ScanError.InvalidJson;
+    }
+    if (i < data.len and data[i] == '.') {
+        i += 1;
+        if (i >= data.len or data[i] < '0' or data[i] > '9') return ScanError.InvalidJson;
+        while (i < data.len and data[i] >= '0' and data[i] <= '9') i += 1;
+    }
+    if (i < data.len and (data[i] == 'e' or data[i] == 'E')) {
+        i += 1;
+        if (i < data.len and (data[i] == '+' or data[i] == '-')) i += 1;
+        if (i >= data.len or data[i] < '0' or data[i] > '9') return ScanError.InvalidJson;
+        while (i < data.len and data[i] >= '0' and data[i] <= '9') i += 1;
+    }
+    pos.* = i;
+}
+
+fn isHexDigit(c: u8) bool {
+    return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
+}
 
 /// Atomic byte write: temp file (0600) in the target dir + rename.
 /// Mirrors util.WriteBytesWithRestrictedPermission (MkdirAll 0750, 0600 file).
