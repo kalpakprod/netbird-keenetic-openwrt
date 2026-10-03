@@ -498,10 +498,22 @@ pub fn bindingRequest(
     if (failed(sock_usize)) return Error.SocketFailed;
     const sock: linux.fd_t = @intCast(sock_usize);
     defer _ = linux.close(sock);
+    return bindingRequestOn(sock, server, trid, opts.software, resp_raw, opts);
+}
 
+/// Same transaction on a caller-owned socket (used for srflx gathering where
+/// the mapped address must belong to the candidate socket).
+pub fn bindingRequestOn(
+    sock: linux.fd_t,
+    server: IpAddress,
+    trid: Trid,
+    software: ?[]const u8,
+    resp_raw: []u8,
+    opts: RequestOptions,
+) Error!usize {
     var req_buf: [256]u8 = undefined;
     var enc = try Encoder.init(&req_buf, MessageType.binding_request, trid);
-    if (opts.software) |sw| try enc.add(Attr.software, sw);
+    if (software) |sw| try enc.add(Attr.software, sw);
     const req = enc.bytes();
 
     var sa_buf: [@sizeOf(linux.sockaddr.in6)]u8 align(@alignOf(linux.sockaddr.in6)) = undefined;
