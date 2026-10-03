@@ -1,0 +1,12 @@
+$stop-that-shit change -- Execute this task card exactly.
+
+```xml
+<task>
+  <goal>M1 (#4): a protobuf code generator written in Zig that turns the upstream .proto files into Zig codecs, plus the generated codecs for management and signal messages.</goal>
+  <workspace>/home/kukuruza/orca/projects/netbird-zig-keenetic-openwrt. Read AGENTS.md first (PR rules, kernel 4.9 limits, load limits). Plan: PLAN.md (lead decisions) and council/r3-merged.md. Reference: upstream/netbird (with vendor/), Zig std at `mise where zig`/lib/std.</workspace>
+  <authority>May create or change only: tools/protogen/**, src/proto/gen/**, src/proto/testdata/**, build.zig (add a protogen step and tests only). PRs through scripts/pr.sh, one PR per logical step (split big work into several PRs, each with passing tests). Go helpers for vectors only under ~/.cache/netbird-zig-context/gen/. Must not: commit on main, install anything, ssh anywhere, touch other files.</authority>
+  <steps>1. Read upstream/netbird/shared/management/proto/management.proto and shared/signal/proto/signalexchange.proto (check exact paths with find) and list the proto3 features they use. 2. Write tools/protogen (pure Zig): parser for that proto3 subset (messages, nested, enums, repeated, packed, maps, oneof, imports of google/protobuf timestamp/duration/empty) and a generator emitting Zig structs with encode/decode on top of src/proto/wire.zig. PR 1: parser with tests. PR 2: generator with tests. 3. Generate src/proto/gen/management.zig and signal.zig; add a build step 'zig build protogen'. 4. Vectors: Go helper builds LoginRequest, SyncResponse (with NetworkMap, peers, routes, DNS) and EncryptedMessage with the upstream generated Go types, writes bytes to src/proto/testdata/*.bin; Zig tests decode them, compare fields, re-encode byte-identical. PR 3: generated codecs with vector tests. Each PR body 'Part of #4'. 5. zig build test passes; paste output.</steps>
+  <rules>Real changes only, never empty or cosmetic commits. Before pushing to an existing branch: git fetch origin and base on origin/&lt;branch&gt;. Facts from files and commands you ran. If a step is impossible, write BLOCKED with the reason. Every "works" claim carries the command and its output.</rules>
+  <deliverable>Report /home/kukuruza/.cache/netbird-zig-context/results/impl-protogen-glm.md: one-line result, files, PR URLs, commands with output, Not verified list, author model, progress line after each step. Last line: STATUS: DONE or STATUS: BLOCKED.</deliverable>
+</task>
+```
