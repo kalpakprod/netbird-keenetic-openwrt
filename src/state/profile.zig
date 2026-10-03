@@ -261,10 +261,20 @@ pub fn parseConfig(allocator: std.mem.Allocator, data: []const u8) Error!std.jso
     };
 }
 
-/// Structural defaults applied after load, mirroring the createNewConfig +
-/// apply() fallback path for missing values (URL/iface/port/bools). Secret
+/// DefaultInterfaceBlacklist from upstream config.go:56-59 (wt0 first).
+var default_iface_blacklist = [_][]const u8{
+    "wt0", "wt",        "utun",      "tun0",   "zt",   "ZeroTier", "wg",
+    "ts",  "Tailscale", "tailscale", "docker", "veth", "br-",      "lo",
+};
+
+/// Structural defaults applied after load, mirroring createNewConfig +
+/// apply() (config.go). is_new selects the new-config branch: fresh
+/// configs default SSH off (createNewConfig:308), while pre-existing
+/// configs keep the legacy SSH-on rule (apply, config.go:501-506) and get
+/// the interface blacklist filled when empty (config.go:468-472). The
+/// filled list points at static storage: do not free or mutate it. Secret
 /// generation (SSH key) belongs to later milestones.
-pub fn applyDefaults(cfg: *Config) void {
+pub fn applyDefaults(cfg: *Config, is_new: bool) void {
     if (cfg.ManagementURL == null) {
         cfg.ManagementURL = Url{ .Scheme = "https", .Host = "api.netbird.io:443" };
     }
@@ -278,10 +288,16 @@ pub fn applyDefaults(cfg: *Config) void {
         cfg.WgPort = default_wg_port;
     }
     if (cfg.ServerSSHAllowed == null) {
-        cfg.ServerSSHAllowed = false;
+        // Go: only android defaults a pre-existing nil to off; every
+        // other OS keeps legacy on. New configs default off everywhere.
+        const android = @import("builtin").abi.isAndroid();
+        cfg.ServerSSHAllowed = !is_new and !android;
     }
     if (cfg.RemoteJobsAllowed == null) {
         cfg.RemoteJobsAllowed = false;
+    }
+    if (cfg.IFaceBlackList == null or cfg.IFaceBlackList.?.len == 0) {
+        cfg.IFaceBlackList = &default_iface_blacklist;
     }
 }
 
@@ -290,7 +306,7 @@ pub fn loadConfig(io: std.Io, allocator: std.mem.Allocator, path: []const u8) Er
     const data = readFileLseek(io, allocator, path) catch |err| switch (err) {
         FileError.NotFound => {
             var cfg = Config{};
-            applyDefaults(&cfg);
+            applyDefaults(&cfg, true);
             try writeJsonAtomic(io, allocator, path, cfg);
             const reloaded = try readFileLseek(io, allocator, path);
             defer allocator.free(reloaded);
@@ -300,7 +316,7 @@ pub fn loadConfig(io: std.Io, allocator: std.mem.Allocator, path: []const u8) Er
     };
     defer allocator.free(data);
     var parsed = try parseConfig(allocator, data);
-    applyDefaults(&parsed.value);
+    applyDefaults(&parsed.value, false);
     return parsed;
 }
 
