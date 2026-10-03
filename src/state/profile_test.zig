@@ -105,7 +105,7 @@ test "parseConfig folds field names like Go" {
 
 test "defaults fill missing values" {
     var cfg = profile.Config{};
-    profile.applyDefaults(&cfg);
+    profile.applyDefaults(&cfg, true);
     try std.testing.expectEqualStrings("https", cfg.ManagementURL.?.Scheme);
     try std.testing.expectEqualStrings("api.netbird.io:443", cfg.ManagementURL.?.Host);
     try std.testing.expectEqualStrings("app.netbird.io:443", cfg.AdminURL.?.Host);
@@ -113,6 +113,29 @@ test "defaults fill missing values" {
     try std.testing.expectEqual(@as(i64, 51820), cfg.WgPort);
     try std.testing.expectEqual(false, cfg.ServerSSHAllowed.?);
     try std.testing.expectEqual(false, cfg.RemoteJobsAllowed.?);
+}
+
+test "existing config keeps legacy SSH and blacklist defaults" {
+    var parsed = try profile.parseConfig(std.testing.allocator, "{}");
+    defer parsed.deinit();
+    profile.applyDefaults(&parsed.value, false);
+    const c = parsed.value;
+    try std.testing.expectEqualStrings("wt0", c.WgIface);
+    try std.testing.expectEqual(@as(i64, 51820), c.WgPort);
+    try std.testing.expectEqual(true, c.ServerSSHAllowed.?);
+    try std.testing.expectEqual(false, c.RemoteJobsAllowed.?);
+    const bl = c.IFaceBlackList.?;
+    try std.testing.expectEqual(@as(usize, 14), bl.len);
+    try std.testing.expectEqualStrings("wt0", bl[0]);
+    try std.testing.expectEqualStrings("lo", bl[13]);
+    // explicit values are never overwritten
+    var parsed2 = try profile.parseConfig(std.testing.allocator,
+        \\{"ServerSSHAllowed": false, "IFaceBlackList": ["custom"]}
+    );
+    defer parsed2.deinit();
+    profile.applyDefaults(&parsed2.value, false);
+    try std.testing.expectEqual(false, parsed2.value.ServerSSHAllowed.?);
+    try std.testing.expectEqual(@as(usize, 1), parsed2.value.IFaceBlackList.?.len);
 }
 
 test "load creates missing config with defaults" {
