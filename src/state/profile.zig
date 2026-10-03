@@ -90,9 +90,11 @@ pub const Url = struct {
 };
 
 pub const Userinfo = struct {
-    username: []const u8,
-    password: []const u8,
-    passwordSet: bool,
+    // Go's url.Userinfo fields are unexported, so it only ever marshals as
+    // {} (or null); defaults make that shape parse to the zero value.
+    username: []const u8 = "",
+    password: []const u8 = "",
+    passwordSet: bool = false,
 };
 
 /// Mirrors profilemanager.Config field-for-field. No omitempty exists

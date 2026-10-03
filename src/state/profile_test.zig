@@ -54,6 +54,16 @@ test "parse nils config from Go" {
     try std.testing.expectEqual(@as(i64, 0), c.WgPort);
 }
 
+test "parseConfig accepts Go empty Userinfo shape" {
+    const with_user =
+        \\{"Name": "u", "ManagementURL": {"Scheme": "https", "Host": "h:443", "User": {}}}
+    ;
+    var parsed = try profile.parseConfig(std.testing.allocator, with_user);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.ManagementURL.?.User != null);
+    try std.testing.expectEqualStrings("", parsed.value.ManagementURL.?.User.?.username);
+}
+
 test "save matches Go byte-for-byte" {
     var parsed = try profile.parseConfig(std.testing.allocator, golden);
     defer parsed.deinit();
