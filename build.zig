@@ -46,6 +46,32 @@ pub fn build(b: *std.Build) void {
     } else {
         test_step.dependOn(&proto_tests.step);
     }
+
+    // zig build protogen: regenerate src/proto/gen/*.zig from the upstream
+    // .proto files. The committed files must stay identical to the output.
+    const protogen_step = b.step("protogen", "Regenerate src/proto/gen/*.zig from upstream protos");
+    const protogen_exe = b.addExecutable(.{
+        .name = "protogen",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/protogen/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const gen_mgmt = b.addRunArtifact(protogen_exe);
+    gen_mgmt.addArgs(&.{
+        "generate",
+        "upstream/netbird/shared/management/proto/management.proto",
+        "src/proto/gen/management.zig",
+    });
+    protogen_step.dependOn(&gen_mgmt.step);
+    const gen_signal = b.addRunArtifact(protogen_exe);
+    gen_signal.addArgs(&.{
+        "generate",
+        "upstream/netbird/shared/signal/proto/signalexchange.proto",
+        "src/proto/gen/signal.zig",
+    });
+    protogen_step.dependOn(&gen_signal.step);
 }
 
 fn discoverTests(
