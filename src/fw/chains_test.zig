@@ -100,32 +100,43 @@ test "router pair keys match Go GenKey" {
     try std.testing.expectEqualStrings("netbird-fwd-abc-false", k3);
 }
 
+fn expectSpec(actual: []const []const u8, expected: []const []const u8) !void {
+    // Element-wise string compare: expectEqualSlices on slices compares
+    // addresses, which only passes for interned literals.
+    try std.testing.expectEqual(expected.len, actual.len);
+    for (expected, actual) |e, a| try std.testing.expectEqualStrings(e, a);
+}
+
 test "static chain specs" {
     var b: [13][]const u8 = undefined;
-    try std.testing.expectEqualSlices(
-        []const u8,
-        &.{ "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT" },
+    try expectSpec(
         chains.establishedBare(&b),
+        &.{ "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT" },
     );
-    try std.testing.expectEqualSlices(
-        []const u8,
-        &.{ "-j", "NETBIRD-RT-NAT" },
+    try expectSpec(
         chains.jump(&b, chains.rt_nat),
+        &.{ "-j", "NETBIRD-RT-NAT" },
     );
-    try std.testing.expectEqualSlices(
-        []const u8,
-        &.{ "-i", "wt0", "-m", "conntrack", "--ctstate", "DNAT", "-m", "mark", "!", "--mark", "0x1bd20", "-j", "DROP" },
+    try expectSpec(
         chains.mangleGuardDnat(&b, "wt0"),
+        &.{ "-i", "wt0", "-m", "conntrack", "--ctstate", "DNAT", "-m", "mark", "!", "--mark", "0x1bd20", "-j", "DROP" },
     );
-    try std.testing.expectEqualSlices(
-        []const u8,
-        &.{ "-i", "wt0", "-m", "conntrack", "--ctstate", "NEW", "-j", "CONNMARK", "--set-mark", "0x1bd10" },
+    try expectSpec(
         chains.dataplaneMarkIn(&b, "wt0"),
+        &.{ "-i", "wt0", "-m", "conntrack", "--ctstate", "NEW", "-j", "CONNMARK", "--set-mark", "0x1bd10" },
     );
-    try std.testing.expectEqualSlices(
-        []const u8,
-        &.{ "-m", "mark", "--mark", "0x1bd21", "!", "-o", "lo", "-j", "MASQUERADE" },
+    try expectSpec(
         chains.natMasqueradeOut(&b),
+        &.{ "-m", "mark", "--mark", "0x1bd21", "!", "-o", "lo", "-j", "MASQUERADE" },
+    );
+    var val: [8]u8 = undefined;
+    try expectSpec(
+        chains.mssClamp(&b, &val, "wt0", 1280, false),
+        &.{ "-o", "wt0", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", "1240" },
+    );
+    try expectSpec(
+        chains.mssClamp(&b, &val, "wt0", 1280, true),
+        &.{ "-o", "wt0", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--set-mss", "1220" },
     );
 }
 
@@ -197,12 +208,15 @@ const expected_mangle =
     \\:FORWARD ACCEPT
     \\:OUTPUT ACCEPT
     \\:POSTROUTING ACCEPT
+    \\:NETBIRD-RT-MSSCLAMP -
     \\:NETBIRD-RT-PRE -
     \\-A PREROUTING -j NETBIRD-RT-PRE
     \\-A PREROUTING -i wt0 -m conntrack --ctstate NEW -j CONNMARK --set-xmark 0x1bd10/0xffffffff
+    \\-A FORWARD -j NETBIRD-RT-MSSCLAMP
     \\-A FORWARD -i wt0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
     \\-A FORWARD -i wt0 -m conntrack --ctstate DNAT -m mark ! --mark 0x1bd20 -j DROP
     \\-A POSTROUTING -o wt0 -m conntrack --ctstate NEW -j CONNMARK --set-xmark 0x1bd11/0xffffffff
+    \\-A NETBIRD-RT-MSSCLAMP -o wt0 -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1240
     \\COMMIT
     \\
 ;
@@ -217,6 +231,8 @@ const expected_nat =
     \\:NETBIRD-RT-RDR -
     \\-A PREROUTING -j NETBIRD-RT-RDR
     \\-A POSTROUTING -j NETBIRD-RT-NAT
+    \\-A NETBIRD-RT-NAT ! -o lo -m mark --mark 0x1bd21 -j MASQUERADE
+    \\-A NETBIRD-RT-NAT -o wt0 -m mark --mark 0x1bd22 -j MASQUERADE
     \\COMMIT
     \\
 ;
