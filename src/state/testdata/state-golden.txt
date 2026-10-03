@@ -1,0 +1,2 @@
+{"gone":null,"sample":{"counter":42,"tags":["a"],"when":"then"}}
+MODE=600

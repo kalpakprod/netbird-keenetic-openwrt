@@ -1,0 +1,73 @@
+{
+    "Name": "test-profile",
+    "PrivateKey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    "PreSharedKey": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+    "ManagementURL": {
+        "Scheme": "https",
+        "Opaque": "",
+        "User": null,
+        "Host": "api.netbird.io:443",
+        "Path": "",
+        "Fragment": "",
+        "RawQuery": "",
+        "RawPath": "",
+        "RawFragment": "",
+        "ForceQuery": false,
+        "OmitHost": false
+    },
+    "AdminURL": {
+        "Scheme": "https",
+        "Opaque": "",
+        "User": null,
+        "Host": "app.netbird.io:443",
+        "Path": "",
+        "Fragment": "",
+        "RawQuery": "",
+        "RawPath": "",
+        "RawFragment": "",
+        "ForceQuery": false,
+        "OmitHost": false
+    },
+    "WgIface": "utun101",
+    "WgPort": 51820,
+    "NetworkMonitor": true,
+    "IFaceBlackList": [
+        "docker0",
+        "veth"
+    ],
+    "DisableIPv6Discovery": true,
+    "RosenpassEnabled": true,
+    "RosenpassPermissive": true,
+    "ServerSSHAllowed": true,
+    "RemoteJobsAllowed": false,
+    "EnableSSHRoot": true,
+    "EnableSSHSFTP": true,
+    "EnableSSHLocalPortForwarding": false,
+    "EnableSSHRemotePortForwarding": false,
+    "DisableSSHAuth": false,
+    "SSHJWTCacheTTL": 3600,
+    "DisableClientRoutes": true,
+    "DisableServerRoutes": true,
+    "DisableDNS": true,
+    "DisableFirewall": true,
+    "BlockLANAccess": true,
+    "BlockInbound": true,
+    "DisableIPv6": true,
+    "SyncMessageVersion": 7,
+    "DisableNotifications": true,
+    "DNSLabels": [
+        "label-a",
+        "label-b"
+    ],
+    "LocalMetricsEnabled": true,
+    "LocalMetricsAddress": "127.0.0.1:9090",
+    "SSHKey": "PEM-BODY-HERE",
+    "NATExternalIPs": [
+        "12.34.56.78/eth0"
+    ],
+    "CustomDNSAddress": "8.8.8.8:53",
+    "DisableAutoConnect": true,
+    "DNSRouteInterval": 30000000000,
+    "ClientCertPath": "/etc/netbird/cert.pem",
+    "ClientCertKeyPath": "/etc/netbird/key.pem"
+}
