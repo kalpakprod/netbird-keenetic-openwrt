@@ -24,6 +24,12 @@ Milestones M1-M10 and the module layout: council/r3-merged.md (council r1+r2, 20
 7. TURN: port the protocol once, keep both call sites compiling.
 
 ## Scope: everything (owner 2026-10-03: «переписывают полностью», size does not matter)
+
+Owner decision 2026-10-04: «Мы переписываем всё на язык программирования Zig, потому что он для роутера лучше…
+Он должен полностью совпадать с оригинальным NetBird'ом… Массовая миграция». The Zig client must behave exactly
+like upstream NetBird: same config and state files, same wire protocol, same CLI. For comparison, bc547/nanoNetBird
+(NetBird on nanoKVM) only compiles the original Go client for riscv64 with a shell script; this repo's install.sh
+already does the same for Keenetic, and the Zig port replaces that binary.
 Nothing from NetBird is excluded. council/r3-merged.md "Deferred" and "excluded" items are later milestones, not cuts.
 Order stays: what the router needs to join the network first (M1-M10), then:
 
