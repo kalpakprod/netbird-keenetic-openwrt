@@ -1,4 +1,4 @@
-// Port of wireguard-go device/timers.go (MIT).
+// Port of wireguard-go device/timers.go (v0.79.0 vendored copy, MIT).
 // Reference: upstream/netbird/vendor/golang.zx2c4.com/wireguard/device/timers.go.
 // Single-threaded port: deadlines as int64 nanoseconds against a caller
 // clock (no goroutines, no time.Timer). The device polls and acts on the
@@ -60,6 +60,9 @@ pub const Timers = struct {
             t.retransmit_handshake = null;
             if (t.handshake_attempts > c.max_timer_handshakes) {
                 a.give_up = true;
+                // Upstream timers.go:82-84: Del() the keepalive while
+                // active, before any other expiration is handled.
+                if (active) t.send_keepalive = null;
                 if (active and t.zero_key_material == null) {
                     t.zero_key_material = now_ns + c.reject_after_time_ns * 3;
                 }
