@@ -72,11 +72,16 @@ pub const Manager = struct {
         try m.dirty.put(key, {});
     }
 
+    /// Replace an entry's raw bytes. Allocates the replacement and marks
+    /// dirty before touching the live entry, so any OutOfMemory leaves the
+    /// manager unchanged (old raw live, no silent dirty gap).
     fn setRaw(m: *Manager, name: []const u8, raw: []const u8) Error!void {
         const e = m.entries.getPtr(name) orelse return Error.StateNotRegistered;
-        m.allocator.free(e.raw);
-        e.raw = try m.allocator.dupe(u8, raw);
+        const replacement = try m.allocator.dupe(u8, raw);
+        errdefer m.allocator.free(replacement);
         try m.markDirty(name);
+        m.allocator.free(e.raw);
+        e.raw = replacement;
     }
 
     /// UpdateState: replaces the state value (compact JSON), marks dirty.
@@ -121,8 +126,9 @@ pub const Manager = struct {
         // loadSingleRawState: "null" decodes to a nil (deleted) state.
         if (raw == .null) {
             if (m.entries.getPtr(name)) |e| {
+                const replacement = try m.allocator.dupe(u8, "null");
                 m.allocator.free(e.raw);
-                e.raw = try m.allocator.dupe(u8, "null");
+                e.raw = replacement;
             }
             return;
         }
@@ -131,8 +137,9 @@ pub const Manager = struct {
         };
         defer m.allocator.free(section);
         if (m.entries.getPtr(name)) |e| {
+            const replacement = try m.allocator.dupe(u8, section);
             m.allocator.free(e.raw);
-            e.raw = try m.allocator.dupe(u8, section);
+            e.raw = replacement;
         }
     }
 
@@ -144,8 +151,12 @@ pub const Manager = struct {
         defer states.deinit();
         if (!states.value.map.contains(name)) return Error.StateNotFound;
         if (m.entries.getPtr(name)) |e| {
+            const replacement = try m.allocator.dupe(u8, "null");
+            errdefer m.allocator.free(replacement);
+            try m.markDirty(name);
             m.allocator.free(e.raw);
-            e.raw = try m.allocator.dupe(u8, "null");
+            e.raw = replacement;
+            return;
         } else {
             const key = try m.allocator.dupe(u8, name);
             errdefer m.allocator.free(key);
@@ -164,8 +175,12 @@ pub const Manager = struct {
         var it = states.value.map.iterator();
         while (it.next()) |e| {
             if (m.entries.getPtr(e.key_ptr.*)) |ent| {
+                const replacement = try m.allocator.dupe(u8, "null");
+                errdefer m.allocator.free(replacement);
+                try m.markDirty(e.key_ptr.*);
                 m.allocator.free(ent.raw);
-                ent.raw = try m.allocator.dupe(u8, "null");
+                ent.raw = replacement;
+                continue;
             } else {
                 const key = try m.allocator.dupe(u8, e.key_ptr.*);
                 errdefer m.allocator.free(key);
@@ -216,8 +231,9 @@ pub const Manager = struct {
     /// Store a value without dirty-marking (cleanup-error preserve path).
     fn setRawKeep(m: *Manager, name: []const u8, raw: []const u8) Error!void {
         const e = m.entries.getPtr(name) orelse return Error.StateNotRegistered;
+        const replacement = try m.allocator.dupe(u8, raw);
         m.allocator.free(e.raw);
-        e.raw = try m.allocator.dupe(u8, raw);
+        e.raw = replacement;
     }
 
     /// GetSavedStateNames: names in the file with non-null values.
