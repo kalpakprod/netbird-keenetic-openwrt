@@ -17,3 +17,21 @@ jobs:
         with:
           name: netbird-aarch64-musl
           path: zig-out/bin/netbird
+  namespace-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.17.0
+      - name: Allow unprivileged user namespaces
+        run: |
+          unshare -Urn true && exit 0
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+          unshare -Urn true
+      # wgtun_test.zig is excluded: it needs the cache-only Go helper
+      # (see its header) and can only run locally, not on the runner.
+      - name: Run namespace tests under unshare
+        run: |
+          zig test src/tun/tun_test.zig --test-cmd unshare --test-cmd -Urn --test-cmd-bin
