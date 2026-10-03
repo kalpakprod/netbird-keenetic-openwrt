@@ -164,3 +164,16 @@ test "prefs put get remove" {
     // removing twice is fine
     try prefs.remove("ui");
 }
+
+test "userConfigDir reads the environment" {
+    // override path (no env needed)
+    profile.config_dir_override = "/tmp/nb-override";
+    const over = try profile.userConfigDir(std.testing.allocator);
+    defer std.testing.allocator.free(over);
+    try std.testing.expectEqualStrings("/tmp/nb-override", over);
+    profile.config_dir_override = "";
+    // env path: HOME is set for tests, result ends in /netbird
+    const dir = try profile.userConfigDir(std.testing.allocator);
+    defer std.testing.allocator.free(dir);
+    try std.testing.expect(std.mem.endsWith(u8, dir, "/netbird"));
+}
