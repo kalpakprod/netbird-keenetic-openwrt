@@ -39,7 +39,11 @@ The lead (Claude session) owns PLAN.md, decisions, commits and pushes. Workers e
   One PR per module or logical step; split big work into several PRs. Put the PR URL in your report.
 - Review: the other agent reviews each PR (different model family) and posts the verdict on GitHub:
   `gh pr review <n> --comment -b "<verdict ДА/НЕТ + findings>"`. On ДА with `zig build test` passing, the reviewer runs
-  `scripts/merge-pr.sh <n>`. On НЕТ the author fixes, pushes to the same branch, reviewer re-checks (two rounds max, then the lead).
+  `scripts/merge-pr.sh <n>` (it merges into the PR's base branch). On НЕТ the author never pushes to the reviewed
+  branch: each finding gets its own fix PR into that branch, from a worktree on origin/<branch>:
+  `BASE=<branch> SRC=<worktree> scripts/pr.sh fix/<short-name> "fix(<module>): <finding> (review of #<n>)" <paths>...`
+  (owner 2026-10-04: more PRs, each a real change). The reviewer reviews and merges each fix PR, then re-checks the
+  original PR; `merge-pr.sh` refuses to merge a PR while fix PRs into its branch are open. Two rounds max, then the lead.
 - No new tools or packages (pip, npm, pacman, go install) without the lead. `go list`, `go test` on upstream code, zig, qemu are allowed.
 - Machine load: before any heavy command check `/proc/loadavg` and `/proc/pressure/io`; wait if 1-min load > 12 or IO full avg10 > 5.
   One heavy command at a time. Test only your own files, never a whole suite.
