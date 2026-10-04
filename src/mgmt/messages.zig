@@ -627,7 +627,9 @@ pub const RelayConfig = struct {
             switch (t.num) {
                 1 => {
                     try expect(t.typ, .bytes);
-                    try m.urls.append(alloc, try getStr(alloc, &d));
+                    const value = try getStr(alloc, &d);
+                    errdefer alloc.free(value);
+                    try m.urls.append(alloc, value);
                 },
                 2 => {
                     try expect(t.typ, .bytes);
@@ -759,11 +761,15 @@ pub const NetbirdConfig = struct {
             switch (t.num) {
                 1 => {
                     try expect(t.typ, .bytes);
-                    try m.stuns.append(alloc, try HostConfig.decode(alloc, try d.consumeBytes()));
+                    var value = try HostConfig.decode(alloc, try d.consumeBytes());
+                    errdefer value.deinit(alloc);
+                    try m.stuns.append(alloc, value);
                 },
                 2 => {
                     try expect(t.typ, .bytes);
-                    try m.turns.append(alloc, try ProtectedHostConfig.decode(alloc, try d.consumeBytes()));
+                    var value = try ProtectedHostConfig.decode(alloc, try d.consumeBytes());
+                    errdefer value.deinit(alloc);
+                    try m.turns.append(alloc, value);
                 },
                 3 => {
                     try expect(t.typ, .bytes);
@@ -836,7 +842,9 @@ pub const JWTConfig = struct {
                 },
                 5 => {
                     try expect(t.typ, .bytes);
-                    try m.audiences.append(alloc, try getStr(alloc, &d));
+                    const value = try getStr(alloc, &d);
+                    errdefer alloc.free(value);
+                    try m.audiences.append(alloc, value);
                 },
                 else => try skip(&d, t.num, t.typ),
             }
@@ -1007,7 +1015,9 @@ pub const Checks = struct {
             switch (t.num) {
                 1 => {
                     try expect(t.typ, .bytes);
-                    try m.files.append(alloc, try getStr(alloc, &d));
+                    const value = try getStr(alloc, &d);
+                    errdefer alloc.free(value);
+                    try m.files.append(alloc, value);
                 },
                 else => try skip(&d, t.num, t.typ),
             }
@@ -1050,7 +1060,9 @@ pub const LoginResponse = struct {
                 },
                 3 => {
                     try expect(t.typ, .bytes);
-                    try m.checks.append(alloc, try Checks.decode(alloc, try d.consumeBytes()));
+                    var value = try Checks.decode(alloc, try d.consumeBytes());
+                    errdefer value.deinit(alloc);
+                    try m.checks.append(alloc, value);
                 },
                 4 => {
                     try expect(t.typ, .bytes);
@@ -1111,7 +1123,9 @@ pub const RemotePeerConfig = struct {
                 },
                 2 => {
                     try expect(t.typ, .bytes);
-                    try m.allowed_ips.append(alloc, try getStr(alloc, &d));
+                    const value = try getStr(alloc, &d);
+                    errdefer alloc.free(value);
+                    try m.allowed_ips.append(alloc, value);
                 },
                 3 => {
                     try expect(t.typ, .bytes);
@@ -1201,7 +1215,9 @@ pub const Route = struct {
                 },
                 8 => {
                     try expect(t.typ, .bytes);
-                    try m.domains.append(alloc, try getStr(alloc, &d));
+                    const value = try getStr(alloc, &d);
+                    errdefer alloc.free(value);
+                    try m.domains.append(alloc, value);
                 },
                 9 => {
                     try expect(t.typ, .varint);
@@ -1294,7 +1310,9 @@ pub const CustomZone = struct {
                 },
                 2 => {
                     try expect(t.typ, .bytes);
-                    try m.records.append(alloc, try SimpleRecord.decode(alloc, try d.consumeBytes()));
+                    var value = try SimpleRecord.decode(alloc, try d.consumeBytes());
+                    errdefer value.deinit(alloc);
+                    try m.records.append(alloc, value);
                 },
                 3 => {
                     try expect(t.typ, .varint);
@@ -1369,7 +1387,9 @@ pub const NameServerGroup = struct {
             switch (t.num) {
                 1 => {
                     try expect(t.typ, .bytes);
-                    try m.name_servers.append(alloc, try NameServer.decode(alloc, try d.consumeBytes()));
+                    var value = try NameServer.decode(alloc, try d.consumeBytes());
+                    errdefer value.deinit(alloc);
+                    try m.name_servers.append(alloc, value);
                 },
                 2 => {
                     try expect(t.typ, .varint);
@@ -1377,7 +1397,9 @@ pub const NameServerGroup = struct {
                 },
                 3 => {
                     try expect(t.typ, .bytes);
-                    try m.domains.append(alloc, try getStr(alloc, &d));
+                    const value = try getStr(alloc, &d);
+                    errdefer alloc.free(value);
+                    try m.domains.append(alloc, value);
                 },
                 4 => {
                     try expect(t.typ, .varint);
@@ -1416,11 +1438,15 @@ pub const DNSConfig = struct {
                 },
                 2 => {
                     try expect(t.typ, .bytes);
-                    try m.name_server_groups.append(alloc, try NameServerGroup.decode(alloc, try d.consumeBytes()));
+                    var value = try NameServerGroup.decode(alloc, try d.consumeBytes());
+                    errdefer value.deinit(alloc);
+                    try m.name_server_groups.append(alloc, value);
                 },
                 3 => {
                     try expect(t.typ, .bytes);
-                    try m.custom_zones.append(alloc, try CustomZone.decode(alloc, try d.consumeBytes()));
+                    var value = try CustomZone.decode(alloc, try d.consumeBytes());
+                    errdefer value.deinit(alloc);
+                    try m.custom_zones.append(alloc, value);
                 },
                 4 => {
                     try expect(t.typ, .varint);
@@ -1584,7 +1610,9 @@ pub const FirewallRule = struct {
                 },
                 9 => {
                     try expect(t.typ, .bytes);
-                    try m.source_prefixes.append(alloc, try getStr(alloc, &d));
+                    const value = try getStr(alloc, &d);
+                    errdefer alloc.free(value);
+                    try m.source_prefixes.append(alloc, value);
                 },
                 else => try skip(&d, t.num, t.typ),
             }
@@ -1624,7 +1652,9 @@ pub const RouteFirewallRule = struct {
             switch (t.num) {
                 1 => {
                     try expect(t.typ, .bytes);
-                    try m.source_ranges.append(alloc, try getStr(alloc, &d));
+                    const value = try getStr(alloc, &d);
+                    errdefer alloc.free(value);
+                    try m.source_ranges.append(alloc, value);
                 },
                 2 => {
                     try expect(t.typ, .varint);
@@ -1649,7 +1679,9 @@ pub const RouteFirewallRule = struct {
                 },
                 7 => {
                     try expect(t.typ, .bytes);
-                    try m.domains.append(alloc, try getStr(alloc, &d));
+                    const value = try getStr(alloc, &d);
+                    errdefer alloc.free(value);
+                    try m.domains.append(alloc, value);
                 },
                 8 => {
                     try expect(t.typ, .varint);
@@ -1783,7 +1815,9 @@ pub const SSHAuth = struct {
                 },
                 2 => {
                     try expect(t.typ, .bytes);
-                    try m.authorized_users.append(alloc, try getStr(alloc, &d));
+                    const value = try getStr(alloc, &d);
+                    errdefer alloc.free(value);
+                    try m.authorized_users.append(alloc, value);
                 },
                 3 => {
                     try expect(t.typ, .bytes);
@@ -1869,7 +1903,9 @@ pub const NetworkMap = struct {
                 },
                 3 => {
                     try expect(t.typ, .bytes);
-                    try m.remote_peers.append(alloc, try RemotePeerConfig.decode(alloc, try d.consumeBytes()));
+                    var value = try RemotePeerConfig.decode(alloc, try d.consumeBytes());
+                    errdefer value.deinit(alloc);
+                    try m.remote_peers.append(alloc, value);
                 },
                 4 => {
                     try expect(t.typ, .varint);
@@ -1877,7 +1913,9 @@ pub const NetworkMap = struct {
                 },
                 5 => {
                     try expect(t.typ, .bytes);
-                    try m.routes.append(alloc, try Route.decode(alloc, try d.consumeBytes()));
+                    var value = try Route.decode(alloc, try d.consumeBytes());
+                    errdefer value.deinit(alloc);
+                    try m.routes.append(alloc, value);
                 },
                 6 => {
                     try expect(t.typ, .bytes);
@@ -1886,11 +1924,15 @@ pub const NetworkMap = struct {
                 },
                 7 => {
                     try expect(t.typ, .bytes);
-                    try m.offline_peers.append(alloc, try RemotePeerConfig.decode(alloc, try d.consumeBytes()));
+                    var value = try RemotePeerConfig.decode(alloc, try d.consumeBytes());
+                    errdefer value.deinit(alloc);
+                    try m.offline_peers.append(alloc, value);
                 },
                 8 => {
                     try expect(t.typ, .bytes);
-                    try m.firewall_rules.append(alloc, try FirewallRule.decode(alloc, try d.consumeBytes()));
+                    var value = try FirewallRule.decode(alloc, try d.consumeBytes());
+                    errdefer value.deinit(alloc);
+                    try m.firewall_rules.append(alloc, value);
                 },
                 9 => {
                     try expect(t.typ, .varint);
@@ -1898,7 +1940,9 @@ pub const NetworkMap = struct {
                 },
                 10 => {
                     try expect(t.typ, .bytes);
-                    try m.routes_firewall_rules.append(alloc, try RouteFirewallRule.decode(alloc, try d.consumeBytes()));
+                    var value = try RouteFirewallRule.decode(alloc, try d.consumeBytes());
+                    errdefer value.deinit(alloc);
+                    try m.routes_firewall_rules.append(alloc, value);
                 },
                 11 => {
                     try expect(t.typ, .varint);
@@ -1906,7 +1950,9 @@ pub const NetworkMap = struct {
                 },
                 12 => {
                     try expect(t.typ, .bytes);
-                    try m.forwarding_rules.append(alloc, try ForwardingRule.decode(alloc, try d.consumeBytes()));
+                    var value = try ForwardingRule.decode(alloc, try d.consumeBytes());
+                    errdefer value.deinit(alloc);
+                    try m.forwarding_rules.append(alloc, value);
                 },
                 13 => {
                     try expect(t.typ, .bytes);
@@ -1957,7 +2003,9 @@ pub const SyncResponse = struct {
                 },
                 6 => {
                     try expect(t.typ, .bytes);
-                    try m.checks.append(alloc, try Checks.decode(alloc, try d.consumeBytes()));
+                    var value = try Checks.decode(alloc, try d.consumeBytes());
+                    errdefer value.deinit(alloc);
+                    try m.checks.append(alloc, value);
                 },
                 7 => {
                     try expect(t.typ, .bytes);
