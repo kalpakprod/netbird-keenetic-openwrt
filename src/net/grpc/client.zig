@@ -8,7 +8,21 @@
 
 const std = @import("std");
 const h2 = @import("../h2/conn.zig");
+const hpack = @import("../h2/hpack.zig");
+const frame = @import("../h2/frame.zig");
 const format = @import("format.zig");
+
+/// Extra request header (gRPC metadata), e.g. the signal peer id.
+pub const Metadata = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+/// Captured response header field (owned by the Call).
+pub const Header = struct {
+    name: []u8,
+    value: []u8,
+};
 
 pub const Error = error{
     GrpcProtocol,
@@ -32,9 +46,16 @@ pub const Call = struct {
     status_msg: std.ArrayList(u8),
     io: std.Io,
     deadline: ?std.Io.Clock.Timestamp = null,
+    resp_headers: std.ArrayList(Header),
+    headers_seen: bool = false,
     done: bool = false,
 
     pub fn deinit(c: *Call) void {
+        for (c.resp_headers.items) |h| {
+            c.alloc.free(h.name);
+            c.alloc.free(h.value);
+        }
+        c.resp_headers.deinit(c.alloc);
         c.rx.deinit(c.alloc);
         c.status_msg.deinit(c.alloc);
     }
@@ -45,6 +66,16 @@ pub const Call = struct {
 
     pub fn statusMessage(c: *const Call) []const u8 {
         return c.status_msg.items;
+    }
+
+    /// First captured response header value, or null. Valid after the
+    /// server's response headers arrive (awaitHeaders, or the first
+    /// recvMessage that drives past them).
+    pub fn responseHeader(c: *const Call, name: []const u8) ?[]const u8 {
+        for (c.resp_headers.items) |h| {
+            if (std.mem.eql(u8, h.name, name)) return h.value;
+        }
+        return null;
     }
 
     /// Pop a complete buffered message, if any. The slice aliases the
@@ -81,6 +112,67 @@ pub const Call = struct {
             c.status_msg.shrinkRetainingCapacity(dec.len);
         }
     }
+
+    fn captureHeaders(c: *Call, fields: []const h2.HeaderField) Error!void {
+        for (fields) |f| {
+            const name = try c.alloc.dupe(u8, f.name);
+            errdefer c.alloc.free(name);
+            const value = try c.alloc.dupe(u8, f.value);
+            errdefer c.alloc.free(value);
+            try c.resp_headers.append(c.alloc, .{ .name = name, .value = value });
+        }
+        c.headers_seen = true;
+    }
+
+    /// Shared response-headers arm (recvMessage and awaitHeaders).
+    fn handleHeaders(c: *Call, stream_id: u32, end_stream: bool, fields: []const h2.HeaderField) Error!void {
+        if (stream_id != c.stream_id) return Error.GrpcUnexpectedStream;
+        const hs = findField(fields, ":status") orelse return Error.GrpcProtocol;
+        if (!std.mem.eql(u8, hs, "200")) return Error.GrpcHttpStatus;
+        const ct = findField(fields, "content-type") orelse return Error.GrpcContentType;
+        if (!std.mem.startsWith(u8, ct, "application/grpc")) return Error.GrpcContentType;
+        try c.captureHeaders(fields);
+        if (end_stream) {
+            // Trailers-only response.
+            try c.takeTrailers(fields);
+            c.done = true;
+            if (c.rx_off != c.rx.items.len) return Error.GrpcTruncated;
+        }
+    }
+
+    /// Shared trailers arm.
+    fn handleTrailers(c: *Call, stream_id: u32, fields: []const h2.HeaderField) Error!void {
+        if (stream_id != c.stream_id) return Error.GrpcUnexpectedStream;
+        try c.takeTrailers(fields);
+        c.done = true;
+        if (c.rx_off != c.rx.items.len) return Error.GrpcTruncated;
+    }
+
+    /// Shared reset arm.
+    fn handleRst(c: *Call, stream_id: u32, code: frame.ErrCode) Error!void {
+        if (stream_id != c.stream_id) return Error.GrpcUnexpectedStream;
+        // grpc-go never sends trailers for a timed-out call: it closes
+        // the stream with RST CANCEL (http2_server.go closeStream).
+        // Like a grpc-go client, an expired local deadline surfaces as
+        // DeadlineExceeded, an early abort as Canceled.
+        if (code == .cancel) {
+            c.status_msg.clearRetainingCapacity();
+            if (c.deadline) |dl| {
+                const now = std.Io.Clock.Timestamp.now(c.io, .awake);
+                if (now.compare(.gte, dl)) {
+                    try c.status_msg.appendSlice(c.alloc, "context deadline exceeded");
+                    c.status_code = 4;
+                    c.done = true;
+                    return;
+                }
+            }
+            try c.status_msg.appendSlice(c.alloc, "canceled");
+            c.status_code = 1;
+            c.done = true;
+            return;
+        }
+        return Error.GrpcProtocol;
+    }
 };
 
 /// Open a call: POST headers without END_STREAM. timeout_ns formats the
@@ -94,29 +186,36 @@ pub fn startCall(
     timeout_ns: ?i64,
     io: std.Io,
 ) Error!Call {
-    // Anonymous literals: they coerce to hpack.HeaderField without importing
-    // hpack (a second import would be a distinct module instance with
-    // distinct types from the one conn.zig uses).
+    return startCallWithHeaders(conn, alloc, path, authority, timeout_ns, io, &.{});
+}
+
+/// Open a call with extra request headers (gRPC metadata).
+pub fn startCallWithHeaders(
+    conn: *h2.Conn,
+    alloc: std.mem.Allocator,
+    path: []const u8,
+    authority: []const u8,
+    timeout_ns: ?i64,
+    io: std.Io,
+    extra: []const Metadata,
+) Error!Call {
     var timeout_buf: [32]u8 = undefined;
-    const id = if (timeout_ns) |ns| blk: {
-        const tv = format.formatTimeout(ns, &timeout_buf);
-        break :blk try conn.writeHeaders(&.{
-            .{ .name = ":method", .value = "POST" },
-            .{ .name = ":scheme", .value = "http" },
-            .{ .name = ":path", .value = path },
-            .{ .name = ":authority", .value = authority },
-            .{ .name = "content-type", .value = "application/grpc" },
-            .{ .name = "te", .value = "trailers" },
-            .{ .name = "grpc-timeout", .value = tv },
-        }, false);
-    } else try conn.writeHeaders(&.{
-        .{ .name = ":method", .value = "POST" },
-        .{ .name = ":scheme", .value = "http" },
-        .{ .name = ":path", .value = path },
-        .{ .name = ":authority", .value = authority },
-        .{ .name = "content-type", .value = "application/grpc" },
-        .{ .name = "te", .value = "trailers" },
-    }, false);
+    const base_n: usize = if (timeout_ns != null) 7 else 6;
+    const fields = try alloc.alloc(hpack.HeaderField, base_n + extra.len);
+    defer alloc.free(fields);
+    fields[0] = .{ .name = ":method", .value = "POST" };
+    fields[1] = .{ .name = ":scheme", .value = "http" };
+    fields[2] = .{ .name = ":path", .value = path };
+    fields[3] = .{ .name = ":authority", .value = authority };
+    fields[4] = .{ .name = "content-type", .value = "application/grpc" };
+    fields[5] = .{ .name = "te", .value = "trailers" };
+    if (timeout_ns) |ns| {
+        fields[6] = .{ .name = "grpc-timeout", .value = format.formatTimeout(ns, &timeout_buf) };
+    }
+    for (extra, 0..) |m, i| {
+        fields[base_n + i] = .{ .name = m.name, .value = m.value };
+    }
+    const id = try conn.writeHeaders(fields, false);
     return .{
         .conn = conn,
         .alloc = alloc,
@@ -131,6 +230,7 @@ pub fn startCall(
             })
         else
             null,
+        .resp_headers = .empty,
     };
 }
 
@@ -164,18 +264,8 @@ pub fn recvMessage(c: *Call) Error!?[]const u8 {
         const ev = try c.conn.readNext() orelse return Error.GrpcTruncated;
         switch (ev) {
             .response_headers => |h| {
-                if (h.stream_id != c.stream_id) return Error.GrpcUnexpectedStream;
-                const hs = findField(h.fields, ":status") orelse return Error.GrpcProtocol;
-                if (!std.mem.eql(u8, hs, "200")) return Error.GrpcHttpStatus;
-                const ct = findField(h.fields, "content-type") orelse return Error.GrpcContentType;
-                if (!std.mem.startsWith(u8, ct, "application/grpc")) return Error.GrpcContentType;
-                if (h.end_stream) {
-                    // Trailers-only response.
-                    try c.takeTrailers(h.fields);
-                    c.done = true;
-                    if (c.rx_off != c.rx.items.len) return Error.GrpcTruncated;
-                    return null;
-                }
+                try c.handleHeaders(h.stream_id, h.end_stream, h.fields);
+                if (c.done) return null;
             },
             .data => |d| {
                 if (d.stream_id != c.stream_id) return Error.GrpcUnexpectedStream;
@@ -185,36 +275,29 @@ pub fn recvMessage(c: *Call) Error!?[]const u8 {
                 try c.conn.sendWindowUpdate(0, @intCast(d.bytes.len));
             },
             .trailers => |t| {
-                if (t.stream_id != c.stream_id) return Error.GrpcUnexpectedStream;
-                try c.takeTrailers(t.fields);
-                c.done = true;
-                if (c.rx_off != c.rx.items.len) return Error.GrpcTruncated;
+                try c.handleTrailers(t.stream_id, t.fields);
                 return null;
             },
             .rst => |r| {
-                if (r.stream_id != c.stream_id) return Error.GrpcUnexpectedStream;
-                // grpc-go never sends trailers for a timed-out call: it closes
-                // the stream with RST CANCEL (http2_server.go closeStream).
-                // Like a grpc-go client, an expired local deadline surfaces as
-                // DeadlineExceeded, an early abort as Canceled.
-                if (r.code == .cancel) {
-                    c.status_msg.clearRetainingCapacity();
-                    if (c.deadline) |dl| {
-                        const now = std.Io.Clock.Timestamp.now(c.io, .awake);
-                        if (now.compare(.gte, dl)) {
-                            try c.status_msg.appendSlice(c.alloc, "context deadline exceeded");
-                            c.status_code = 4;
-                            c.done = true;
-                            return null;
-                        }
-                    }
-                    try c.status_msg.appendSlice(c.alloc, "canceled");
-                    c.status_code = 1;
-                    c.done = true;
-                    return null;
-                }
-                return Error.GrpcProtocol;
+                try c.handleRst(r.stream_id, r.code);
+                return null;
             },
+            .goaway => return Error.GrpcProtocol,
+            .settings_applied, .ping_acked, .window_update => {},
+        }
+    }
+}
+
+/// Drive the connection until the server's response headers arrive (then
+/// responseHeader() is valid) or the call ends terminally first.
+pub fn awaitHeaders(c: *Call) Error!void {
+    while (!c.headers_seen and !c.done) {
+        const ev = try c.conn.readNext() orelse return Error.GrpcTruncated;
+        switch (ev) {
+            .response_headers => |h| try c.handleHeaders(h.stream_id, h.end_stream, h.fields),
+            .trailers => |t| try c.handleTrailers(t.stream_id, t.fields),
+            .rst => |r| try c.handleRst(r.stream_id, r.code),
+            .data => return Error.GrpcProtocol,
             .goaway => return Error.GrpcProtocol,
             .settings_applied, .ping_acked, .window_update => {},
         }
