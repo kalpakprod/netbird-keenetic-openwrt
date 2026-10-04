@@ -115,10 +115,11 @@ pub const Call = struct {
 
     fn captureHeaders(c: *Call, fields: []const h2.HeaderField) Error!void {
         for (fields) |f| {
-            try c.resp_headers.append(c.alloc, .{
-                .name = try c.alloc.dupe(u8, f.name),
-                .value = try c.alloc.dupe(u8, f.value),
-            });
+            const name = try c.alloc.dupe(u8, f.name);
+            errdefer c.alloc.free(name);
+            const value = try c.alloc.dupe(u8, f.value);
+            errdefer c.alloc.free(value);
+            try c.resp_headers.append(c.alloc, .{ .name = name, .value = value });
         }
         c.headers_seen = true;
     }
