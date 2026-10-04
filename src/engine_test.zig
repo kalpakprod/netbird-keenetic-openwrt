@@ -8,6 +8,7 @@ const Fake = struct {
     login_calls: usize = 0,
     start_calls: usize = 0,
     stop_calls: usize = 0,
+    live: usize = 0,
     key_buf: [128]u8 = undefined,
     key_len: usize = 0,
     login_err: ?engine.Service.AuthError = null,
@@ -28,12 +29,14 @@ const Fake = struct {
     fn startFn(ctx: *anyopaque) engine.Service.StartError!void {
         const f: *Fake = @ptrCast(@alignCast(ctx));
         f.start_calls += 1;
+        f.live += 1;
         if (f.start_err) |e| return e;
     }
 
     fn stopFn(ctx: *anyopaque) void {
         const f: *Fake = @ptrCast(@alignCast(ctx));
         f.stop_calls += 1;
+        if (f.live > 0) f.live -= 1;
     }
 };
 
@@ -188,14 +191,18 @@ test "setup key never surfaces in status" {
     try std.testing.expectEqualStrings("SECRET", fake.key_buf[0..fake.key_len]);
 }
 
-test "down from error lands stopped without stop call" {
+test "down after failed start does not stop again" {
     var fake = Fake{ .start_err = error.StartFailed };
     var e = try engine.Engine.init(std.testing.allocator, fake.service());
     defer e.deinit();
     try std.testing.expectError(engine.LoginError.StartFailed, e.login("K"));
+    // Rollback already stopped once and released the partial resource.
+    try std.testing.expectEqual(@as(usize, 1), fake.stop_calls);
+    try std.testing.expectEqual(@as(usize, 0), fake.live);
     try e.down();
     try std.testing.expectEqual(engine.State.stopped, e.status().state);
-    try std.testing.expectEqual(@as(usize, 0), fake.stop_calls);
+    try std.testing.expectEqual(@as(usize, 1), fake.stop_calls);
+    try std.testing.expectEqual(@as(usize, 0), fake.live);
 }
 
 test "relogin while connected reruns the chain" {
@@ -235,4 +242,87 @@ fn oomFlow(alloc: std.mem.Allocator) !void {
 
 test "allocator failures leave no debris" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, oomFlow, .{});
+}
+
+test "failed start rolls back live resources exactly once" {
+    var fake = Fake{ .start_err = error.StartFailed };
+    var e = try engine.Engine.init(std.testing.allocator, fake.service());
+    defer e.deinit();
+    try std.testing.expectError(engine.LoginError.StartFailed, e.login("K"));
+    try std.testing.expectEqual(@as(usize, 0), fake.live);
+    try std.testing.expectEqual(@as(usize, 1), fake.stop_calls);
+    try e.down();
+    try e.down();
+    try std.testing.expectEqual(engine.State.stopped, e.status().state);
+    try std.testing.expectEqual(@as(usize, 0), fake.live);
+    try std.testing.expectEqual(@as(usize, 1), fake.stop_calls);
+}
+
+test "every allocation failure still releases live resources" {
+    const total = blk: {
+        var fa = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var fake = Fake{};
+        var e = try engine.Engine.init(fa.allocator(), fake.service());
+        defer e.deinit();
+        try e.login("K");
+        try e.down();
+        break :blk fa.alloc_index;
+    };
+    for (0..total + 1) |i| {
+        var fa = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = i });
+        var fake = Fake{};
+        {
+            var e = engine.Engine.init(fa.allocator(), fake.service()) catch |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                try std.testing.expectEqual(@as(usize, 0), fake.live);
+                try std.testing.expectEqual(fa.allocated_bytes, fa.freed_bytes);
+                continue;
+            };
+            defer e.deinit();
+            e.login("K") catch |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+            };
+            e.down() catch |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+            };
+            try std.testing.expectEqual(@as(usize, 0), fake.live);
+        }
+        try std.testing.expectEqual(fa.allocated_bytes, fa.freed_bytes);
+    }
+}
+
+test "failed start keeps service error when status allocation fails" {
+    const total = blk: {
+        var fa = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var fake = Fake{ .start_err = error.StartFailed };
+        var e = try engine.Engine.init(fa.allocator(), fake.service());
+        defer e.deinit();
+        try std.testing.expectError(engine.LoginError.StartFailed, e.login("K"));
+        try e.down();
+        break :blk fa.alloc_index;
+    };
+    var saw_preserved = false;
+    for (0..total + 1) |i| {
+        var fa = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = i });
+        var fake = Fake{ .start_err = error.StartFailed };
+        {
+            var e = engine.Engine.init(fa.allocator(), fake.service()) catch |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                try std.testing.expectEqual(@as(usize, 0), fake.live);
+                try std.testing.expectEqual(fa.allocated_bytes, fa.freed_bytes);
+                continue;
+            };
+            defer e.deinit();
+            e.login("K") catch |err| {
+                try std.testing.expect(err == error.OutOfMemory or err == error.StartFailed);
+                if (fa.has_induced_failure and err == error.StartFailed) saw_preserved = true;
+            };
+            e.down() catch |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+            };
+            try std.testing.expectEqual(@as(usize, 0), fake.live);
+        }
+        try std.testing.expectEqual(fa.allocated_bytes, fa.freed_bytes);
+    }
+    try std.testing.expect(saw_preserved);
 }

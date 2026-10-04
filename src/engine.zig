@@ -37,6 +37,10 @@ pub const Status = struct {
 
 /// Injectable service boundary (repo Transport-style vtable). The setup key
 /// is passed transiently to loginFn and never stored by the Engine.
+/// Cleanup contract: startFn may acquire partial resources before failing;
+/// the Engine then calls stopFn exactly once (rollback), and stopFn must be
+/// safe after such an attempted start (releasing whatever was acquired, or
+/// nothing). A later down() never re-stops a rolled-back start.
 pub const Service = struct {
     ctx: *anyopaque,
     loginFn: *const fn (*anyopaque, []const u8) AuthError!void,
@@ -82,13 +86,33 @@ pub const Engine = struct {
         e.state = s;
     }
 
+    /// Record a terminal failure. The state change never allocates, so
+    /// rollback cannot fail; the message update is best-effort and never
+    /// replaces the original service error.
+    fn fail(e: *Engine, msg: []const u8) void {
+        e.state = .@"error";
+        if (e.alloc.dupe(u8, msg)) |n| {
+            e.alloc.free(e.message);
+            e.message = n;
+        } else |_| {}
+    }
+
     fn startChain(e: *Engine) Service.StartError!void {
         try e.transition(.starting, State.starting.name());
         e.service.startFn(e.service.ctx) catch |err| {
-            try e.transition(.@"error", "start failed");
+            // Rollback: the service may hold partial resources. stopFn is
+            // safe after an attempted start; the original error is kept.
+            e.service.stopFn(e.service.ctx);
+            e.fail("start failed");
             return err;
         };
-        try e.transition(.connected, State.connected.name());
+        e.transition(.connected, State.connected.name()) catch {
+            // Resource acquired but the state publish failed: release it.
+            // down() later sees error and does not stop again.
+            e.service.stopFn(e.service.ctx);
+            e.fail("start failed");
+            return error.OutOfMemory;
+        };
     }
 
     /// Authenticate with a setup key, then start. The key is passed to the
@@ -101,7 +125,7 @@ pub const Engine = struct {
             return error.MissingSetupKey;
         }
         e.service.loginFn(e.service.ctx, setup_key) catch |err| {
-            try e.transition(.@"error", "login failed");
+            e.fail("login failed");
             return err;
         };
         e.authenticated = true;
