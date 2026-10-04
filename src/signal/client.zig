@@ -59,7 +59,8 @@ pub const Client = struct {
     }
 
     /// Unbox an EncryptedMessage into a local Message (remote = sender).
-    fn decryptMessage(c: *Client, env_bytes: []const u8) Error!messages.Message {
+    /// Public for the ownership regression test (src/signal_ownership_test.zig).
+    pub fn decryptMessage(c: *Client, env_bytes: []const u8) Error!messages.Message {
         var env = try messages.EncryptedMessage.decode(c.alloc, env_bytes);
         defer env.deinit(c.alloc);
         const remote = try wgbox.parseKey(env.key);
@@ -67,8 +68,10 @@ pub const Client = struct {
         defer c.alloc.free(dec);
         var body = try messages.Body.decode(c.alloc, dec);
         errdefer body.deinit(c.alloc);
+        const key = try c.alloc.dupe(u8, env.key);
+        errdefer c.alloc.free(key);
         return .{
-            .key = try c.alloc.dupe(u8, env.key),
+            .key = key,
             .remote_key = try c.alloc.dupe(u8, env.remote_key),
             .body = body,
             .owned = true,
