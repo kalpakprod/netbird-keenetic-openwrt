@@ -2,7 +2,7 @@
 // Each decoder gets a buffer with every owned field repeated (two concatenated
 // valid encodings, last wins) and every single-allocation failure point is
 // swept, requiring OutOfMemory-or-success with zero live bytes and no invalid
-// frees. Run: zig test src/signal_ownership_test.zig
+// frees. Run: zig test src/signal_replace_ownership_test.zig
 
 const std = @import("std");
 const messages = @import("signal/messages.zig");
