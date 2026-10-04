@@ -113,6 +113,19 @@ test "up without auth needs login" {
     try std.testing.expectEqual(@as(usize, 0), fake.start_calls);
 }
 
+test "up after successful login does not start a second live service" {
+    var fake = Fake{};
+    var e = try engine.Engine.init(std.testing.allocator, fake.service());
+    defer e.deinit();
+    try e.login("LOCAL_SYNTHETIC_KEY");
+    try std.testing.expectEqual(engine.State.connected, e.status().state);
+    try e.up();
+    try std.testing.expectEqual(engine.State.connected, e.status().state);
+    try std.testing.expectEqual(@as(usize, 1), fake.login_calls);
+    try std.testing.expectEqual(@as(usize, 1), fake.start_calls);
+    try std.testing.expectEqual(@as(usize, 0), fake.stop_calls);
+}
+
 test "up after down reconnects without new login" {
     var fake = Fake{};
     var e = try engine.Engine.init(std.testing.allocator, fake.service());

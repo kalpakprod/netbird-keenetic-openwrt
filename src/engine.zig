@@ -109,12 +109,14 @@ pub const Engine = struct {
     }
 
     /// Start when already authenticated (e.g. reconnect after down).
-    /// Unauthenticated -> needs_login.
+    /// Unauthenticated -> needs_login. When already .connected the live
+    /// service is left alone: up returns without a second start (idempotent).
     pub fn up(e: *Engine) UpError!void {
         if (!e.authenticated) {
             try e.transition(.needs_login, "not authenticated");
             return error.NotAuthenticated;
         }
+        if (e.state == .connected) return;
         try e.startChain();
     }
 
