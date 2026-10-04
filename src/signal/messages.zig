@@ -139,18 +139,21 @@ pub const EncryptedMessage = struct {
             switch (t.num) {
                 2 => {
                     try expect(t.typ, .bytes);
+                    const tmp = try getStr(alloc, &d);
                     alloc.free(m.key);
-                    m.key = try getStr(alloc, &d);
+                    m.key = tmp;
                 },
                 3 => {
                     try expect(t.typ, .bytes);
+                    const tmp = try getStr(alloc, &d);
                     alloc.free(m.remote_key);
-                    m.remote_key = try getStr(alloc, &d);
+                    m.remote_key = tmp;
                 },
                 4 => {
                     try expect(t.typ, .bytes);
+                    const tmp = try getStr(alloc, &d);
                     alloc.free(m.body);
-                    m.body = try getStr(alloc, &d);
+                    m.body = tmp;
                 },
                 else => try skip(&d, t.num, t.typ),
             }
@@ -245,13 +248,15 @@ pub const RosenpassConfig = struct {
             switch (t.num) {
                 1 => {
                     try expect(t.typ, .bytes);
+                    const tmp = try getStr(alloc, &d);
                     alloc.free(m.rosenpass_pub_key);
-                    m.rosenpass_pub_key = try getStr(alloc, &d);
+                    m.rosenpass_pub_key = tmp;
                 },
                 2 => {
                     try expect(t.typ, .bytes);
+                    const tmp = try getStr(alloc, &d);
                     alloc.free(m.rosenpass_server_addr);
-                    m.rosenpass_server_addr = try getStr(alloc, &d);
+                    m.rosenpass_server_addr = tmp;
                 },
                 else => try skip(&d, t.num, t.typ),
             }
@@ -334,8 +339,9 @@ pub const Body = struct {
                 },
                 2 => {
                     try expect(t.typ, .bytes);
+                    const tmp = try getStr(alloc, &d);
                     alloc.free(m.payload);
-                    m.payload = try getStr(alloc, &d);
+                    m.payload = tmp;
                 },
                 3 => {
                     try expect(t.typ, .varint);
@@ -343,8 +349,9 @@ pub const Body = struct {
                 },
                 4 => {
                     try expect(t.typ, .bytes);
+                    const tmp = try getStr(alloc, &d);
                     alloc.free(m.netbird_version);
-                    m.netbird_version = try getStr(alloc, &d);
+                    m.netbird_version = tmp;
                 },
                 5 => {
                     try expect(t.typ, .bytes);
@@ -363,23 +370,27 @@ pub const Body = struct {
                 },
                 7 => {
                     try expect(t.typ, .bytes);
+                    const tmp = try RosenpassConfig.decode(alloc, try d.consumeBytes());
                     if (m.rosenpass_config) |*r| r.deinit(alloc);
-                    m.rosenpass_config = try RosenpassConfig.decode(alloc, try d.consumeBytes());
+                    m.rosenpass_config = tmp;
                 },
                 8 => {
                     try expect(t.typ, .bytes);
+                    const tmp = try getStr(alloc, &d);
                     if (m.relay_server_address) |s| alloc.free(s);
-                    m.relay_server_address = try getStr(alloc, &d);
+                    m.relay_server_address = tmp;
                 },
                 10 => {
                     try expect(t.typ, .bytes);
+                    const tmp = try getStr(alloc, &d);
                     if (m.session_id) |s| alloc.free(s);
-                    m.session_id = try getStr(alloc, &d);
+                    m.session_id = tmp;
                 },
                 11 => {
                     try expect(t.typ, .bytes);
+                    const tmp = try getStr(alloc, &d);
                     if (m.relay_server_ip) |s| alloc.free(s);
-                    m.relay_server_ip = try getStr(alloc, &d);
+                    m.relay_server_ip = tmp;
                 },
                 else => try skip(&d, t.num, t.typ),
             }
