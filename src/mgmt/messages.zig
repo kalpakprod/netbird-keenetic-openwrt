@@ -185,13 +185,15 @@ pub const EncryptedMessage = struct {
             switch (t.num) {
                 1 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.wg_pub_key);
-                    m.wg_pub_key = try getStr(alloc, &d);
+                    m.wg_pub_key = value;
                 },
                 2 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.body);
-                    m.body = try getStr(alloc, &d);
+                    m.body = value;
                 },
                 3 => {
                     try expect(t.typ, .varint);
@@ -496,8 +498,9 @@ pub const ServerKeyResponse = struct {
             switch (t.num) {
                 1 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.key);
-                    m.key = try getStr(alloc, &d);
+                    m.key = value;
                 },
                 2 => {
                     try expect(t.typ, .bytes);
@@ -552,8 +555,9 @@ pub const HostConfig = struct {
             switch (t.num) {
                 1 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.uri);
-                    m.uri = try getStr(alloc, &d);
+                    m.uri = value;
                 },
                 2 => {
                     try expect(t.typ, .varint);
@@ -586,18 +590,21 @@ pub const ProtectedHostConfig = struct {
             switch (t.num) {
                 1 => {
                     try expect(t.typ, .bytes);
+                    const value = try HostConfig.decode(alloc, try d.consumeBytes());
                     if (m.host_config) |*h| h.deinit(alloc);
-                    m.host_config = try HostConfig.decode(alloc, try d.consumeBytes());
+                    m.host_config = value;
                 },
                 2 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.user);
-                    m.user = try getStr(alloc, &d);
+                    m.user = value;
                 },
                 3 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.password);
-                    m.password = try getStr(alloc, &d);
+                    m.password = value;
                 },
                 else => try skip(&d, t.num, t.typ),
             }
@@ -633,13 +640,15 @@ pub const RelayConfig = struct {
                 },
                 2 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.token_payload);
-                    m.token_payload = try getStr(alloc, &d);
+                    m.token_payload = value;
                 },
                 3 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.token_signature);
-                    m.token_signature = try getStr(alloc, &d);
+                    m.token_signature = value;
                 },
                 else => try skip(&d, t.num, t.typ),
             }
@@ -673,18 +682,21 @@ pub const FlowConfig = struct {
             switch (t.num) {
                 1 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.url);
-                    m.url = try getStr(alloc, &d);
+                    m.url = value;
                 },
                 2 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.token_payload);
-                    m.token_payload = try getStr(alloc, &d);
+                    m.token_payload = value;
                 },
                 3 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.token_signature);
-                    m.token_signature = try getStr(alloc, &d);
+                    m.token_signature = value;
                 },
                 4 => {
                     try expect(t.typ, .bytes);
@@ -773,18 +785,21 @@ pub const NetbirdConfig = struct {
                 },
                 3 => {
                     try expect(t.typ, .bytes);
+                    const value = try HostConfig.decode(alloc, try d.consumeBytes());
                     if (m.signal) |*s| s.deinit(alloc);
-                    m.signal = try HostConfig.decode(alloc, try d.consumeBytes());
+                    m.signal = value;
                 },
                 4 => {
                     try expect(t.typ, .bytes);
+                    const value = try RelayConfig.decode(alloc, try d.consumeBytes());
                     if (m.relay) |*r| r.deinit(alloc);
-                    m.relay = try RelayConfig.decode(alloc, try d.consumeBytes());
+                    m.relay = value;
                 },
                 5 => {
                     try expect(t.typ, .bytes);
+                    const value = try FlowConfig.decode(alloc, try d.consumeBytes());
                     if (m.flow) |*f| f.deinit(alloc);
-                    m.flow = try FlowConfig.decode(alloc, try d.consumeBytes());
+                    m.flow = value;
                 },
                 6 => {
                     try expect(t.typ, .bytes);
@@ -823,18 +838,21 @@ pub const JWTConfig = struct {
             switch (t.num) {
                 1 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.issuer);
-                    m.issuer = try getStr(alloc, &d);
+                    m.issuer = value;
                 },
                 2 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.audience);
-                    m.audience = try getStr(alloc, &d);
+                    m.audience = value;
                 },
                 3 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.keys_location);
-                    m.keys_location = try getStr(alloc, &d);
+                    m.keys_location = value;
                 },
                 4 => {
                     try expect(t.typ, .varint);
@@ -876,13 +894,15 @@ pub const SSHConfig = struct {
                 },
                 2 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.ssh_pub_key);
-                    m.ssh_pub_key = try getStr(alloc, &d);
+                    m.ssh_pub_key = value;
                 },
                 3 => {
                     try expect(t.typ, .bytes);
+                    const value = try JWTConfig.decode(alloc, try d.consumeBytes());
                     if (m.jwt_config) |*j| j.deinit(alloc);
-                    m.jwt_config = try JWTConfig.decode(alloc, try d.consumeBytes());
+                    m.jwt_config = value;
                 },
                 else => try skip(&d, t.num, t.typ),
             }
@@ -908,8 +928,9 @@ pub const AutoUpdateSettings = struct {
             switch (t.num) {
                 1 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.version);
-                    m.version = try getStr(alloc, &d);
+                    m.version = value;
                 },
                 2 => {
                     try expect(t.typ, .varint);
@@ -951,23 +972,27 @@ pub const PeerConfig = struct {
             switch (t.num) {
                 1 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.address);
-                    m.address = try getStr(alloc, &d);
+                    m.address = value;
                 },
                 2 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.dns);
-                    m.dns = try getStr(alloc, &d);
+                    m.dns = value;
                 },
                 3 => {
                     try expect(t.typ, .bytes);
+                    const value = try SSHConfig.decode(alloc, try d.consumeBytes());
                     if (m.ssh_config) |*s| s.deinit(alloc);
-                    m.ssh_config = try SSHConfig.decode(alloc, try d.consumeBytes());
+                    m.ssh_config = value;
                 },
                 4 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.fqdn);
-                    m.fqdn = try getStr(alloc, &d);
+                    m.fqdn = value;
                 },
                 5 => {
                     try expect(t.typ, .varint);
@@ -983,13 +1008,15 @@ pub const PeerConfig = struct {
                 },
                 8 => {
                     try expect(t.typ, .bytes);
+                    const value = try AutoUpdateSettings.decode(alloc, try d.consumeBytes());
                     if (m.auto_update) |*a| a.deinit(alloc);
-                    m.auto_update = try AutoUpdateSettings.decode(alloc, try d.consumeBytes());
+                    m.auto_update = value;
                 },
                 9 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.address_v6);
-                    m.address_v6 = try getStr(alloc, &d);
+                    m.address_v6 = value;
                 },
                 else => try skip(&d, t.num, t.typ),
             }
@@ -1050,13 +1077,15 @@ pub const LoginResponse = struct {
             switch (t.num) {
                 1 => {
                     try expect(t.typ, .bytes);
+                    const value = try NetbirdConfig.decode(alloc, try d.consumeBytes());
                     if (m.netbird_config) |*c| c.deinit(alloc);
-                    m.netbird_config = try NetbirdConfig.decode(alloc, try d.consumeBytes());
+                    m.netbird_config = value;
                 },
                 2 => {
                     try expect(t.typ, .bytes);
+                    const value = try PeerConfig.decode(alloc, try d.consumeBytes());
                     if (m.peer_config) |*p| p.deinit(alloc);
-                    m.peer_config = try PeerConfig.decode(alloc, try d.consumeBytes());
+                    m.peer_config = value;
                 },
                 3 => {
                     try expect(t.typ, .bytes);
@@ -1118,8 +1147,9 @@ pub const RemotePeerConfig = struct {
             switch (t.num) {
                 1 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.wg_pub_key);
-                    m.wg_pub_key = try getStr(alloc, &d);
+                    m.wg_pub_key = value;
                 },
                 2 => {
                     try expect(t.typ, .bytes);
@@ -1129,18 +1159,21 @@ pub const RemotePeerConfig = struct {
                 },
                 3 => {
                     try expect(t.typ, .bytes);
+                    const value = try SSHConfig.decode(alloc, try d.consumeBytes());
                     if (m.ssh_config) |*s| s.deinit(alloc);
-                    m.ssh_config = try SSHConfig.decode(alloc, try d.consumeBytes());
+                    m.ssh_config = value;
                 },
                 4 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.fqdn);
-                    m.fqdn = try getStr(alloc, &d);
+                    m.fqdn = value;
                 },
                 5 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.agent_version);
-                    m.agent_version = try getStr(alloc, &d);
+                    m.agent_version = value;
                 },
                 6 => {
                     try expect(t.typ, .varint);
@@ -1183,13 +1216,15 @@ pub const Route = struct {
             switch (t.num) {
                 1 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.id);
-                    m.id = try getStr(alloc, &d);
+                    m.id = value;
                 },
                 2 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.network);
-                    m.network = try getStr(alloc, &d);
+                    m.network = value;
                 },
                 3 => {
                     try expect(t.typ, .varint);
@@ -1197,8 +1232,9 @@ pub const Route = struct {
                 },
                 4 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.peer);
-                    m.peer = try getStr(alloc, &d);
+                    m.peer = value;
                 },
                 5 => {
                     try expect(t.typ, .varint);
@@ -1210,8 +1246,9 @@ pub const Route = struct {
                 },
                 7 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.net_id);
-                    m.net_id = try getStr(alloc, &d);
+                    m.net_id = value;
                 },
                 8 => {
                     try expect(t.typ, .bytes);
@@ -1256,8 +1293,9 @@ pub const SimpleRecord = struct {
             switch (t.num) {
                 1 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.name);
-                    m.name = try getStr(alloc, &d);
+                    m.name = value;
                 },
                 2 => {
                     try expect(t.typ, .varint);
@@ -1265,8 +1303,9 @@ pub const SimpleRecord = struct {
                 },
                 3 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.class);
-                    m.class = try getStr(alloc, &d);
+                    m.class = value;
                 },
                 4 => {
                     try expect(t.typ, .varint);
@@ -1274,8 +1313,9 @@ pub const SimpleRecord = struct {
                 },
                 5 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.rdata);
-                    m.rdata = try getStr(alloc, &d);
+                    m.rdata = value;
                 },
                 else => try skip(&d, t.num, t.typ),
             }
@@ -1305,8 +1345,9 @@ pub const CustomZone = struct {
             switch (t.num) {
                 1 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.domain);
-                    m.domain = try getStr(alloc, &d);
+                    m.domain = value;
                 },
                 2 => {
                     try expect(t.typ, .bytes);
@@ -1347,8 +1388,9 @@ pub const NameServer = struct {
             switch (t.num) {
                 1 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.ip);
-                    m.ip = try getStr(alloc, &d);
+                    m.ip = value;
                 },
                 2 => {
                     try expect(t.typ, .varint);
@@ -1592,8 +1634,9 @@ pub const FirewallRule = struct {
                 },
                 5 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.port);
-                    m.port = try getStr(alloc, &d);
+                    m.port = value;
                 },
                 6 => {
                     try expect(t.typ, .bytes);
@@ -1601,8 +1644,9 @@ pub const FirewallRule = struct {
                 },
                 7 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.policy_id);
-                    m.policy_id = try getStr(alloc, &d);
+                    m.policy_id = value;
                 },
                 8 => {
                     try expect(t.typ, .varint);
@@ -1662,8 +1706,9 @@ pub const RouteFirewallRule = struct {
                 },
                 3 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.destination);
-                    m.destination = try getStr(alloc, &d);
+                    m.destination = value;
                 },
                 4 => {
                     try expect(t.typ, .varint);
@@ -1689,13 +1734,15 @@ pub const RouteFirewallRule = struct {
                 },
                 9 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.policy_id);
-                    m.policy_id = try getStr(alloc, &d);
+                    m.policy_id = value;
                 },
                 10 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.route_id);
-                    m.route_id = try getStr(alloc, &d);
+                    m.route_id = value;
                 },
                 else => try skip(&d, t.num, t.typ),
             }
@@ -1731,8 +1778,9 @@ pub const ForwardingRule = struct {
                 },
                 3 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.translated_address);
-                    m.translated_address = try getStr(alloc, &d);
+                    m.translated_address = value;
                 },
                 4 => {
                     try expect(t.typ, .bytes);
@@ -1810,8 +1858,9 @@ pub const SSHAuth = struct {
             switch (t.num) {
                 1 => {
                     try expect(t.typ, .bytes);
+                    const value = try getStr(alloc, &d);
                     alloc.free(m.user_id_claim);
-                    m.user_id_claim = try getStr(alloc, &d);
+                    m.user_id_claim = value;
                 },
                 2 => {
                     try expect(t.typ, .bytes);
@@ -1832,13 +1881,15 @@ pub const SSHAuth = struct {
                         switch (et.num) {
                             1 => {
                                 try expect(et.typ, .bytes);
+                                const value = try getStr(alloc, &ed);
                                 alloc.free(entry.key);
-                                entry.key = try getStr(alloc, &ed);
+                                entry.key = value;
                             },
                             2 => {
                                 try expect(et.typ, .bytes);
+                                const value = try MachineUserIndexes.decode(alloc, try ed.consumeBytes());
                                 entry.value.deinit(alloc);
-                                entry.value = try MachineUserIndexes.decode(alloc, try ed.consumeBytes());
+                                entry.value = value;
                             },
                             else => try skip(&ed, et.num, et.typ),
                         }
@@ -1898,8 +1949,9 @@ pub const NetworkMap = struct {
                 },
                 2 => {
                     try expect(t.typ, .bytes);
+                    const value = try PeerConfig.decode(alloc, try d.consumeBytes());
                     if (m.peer_config) |*p| p.deinit(alloc);
-                    m.peer_config = try PeerConfig.decode(alloc, try d.consumeBytes());
+                    m.peer_config = value;
                 },
                 3 => {
                     try expect(t.typ, .bytes);
@@ -1919,8 +1971,9 @@ pub const NetworkMap = struct {
                 },
                 6 => {
                     try expect(t.typ, .bytes);
+                    const value = try DNSConfig.decode(alloc, try d.consumeBytes());
                     if (m.dns_config) |*x| x.deinit(alloc);
-                    m.dns_config = try DNSConfig.decode(alloc, try d.consumeBytes());
+                    m.dns_config = value;
                 },
                 7 => {
                     try expect(t.typ, .bytes);
@@ -1956,8 +2009,9 @@ pub const NetworkMap = struct {
                 },
                 13 => {
                     try expect(t.typ, .bytes);
+                    const value = try SSHAuth.decode(alloc, try d.consumeBytes());
                     if (m.ssh_auth) |*s| s.deinit(alloc);
-                    m.ssh_auth = try SSHAuth.decode(alloc, try d.consumeBytes());
+                    m.ssh_auth = value;
                 },
                 else => try skip(&d, t.num, t.typ),
             }
@@ -1991,15 +2045,17 @@ pub const SyncResponse = struct {
             switch (t.num) {
                 1 => {
                     try expect(t.typ, .bytes);
+                    const value = try NetbirdConfig.decode(alloc, try d.consumeBytes());
                     if (m.netbird_config) |*c| c.deinit(alloc);
-                    m.netbird_config = try NetbirdConfig.decode(alloc, try d.consumeBytes());
+                    m.netbird_config = value;
                 },
                 // 2-4 (peerConfig, remotePeers, remotePeersIsEmpty) are
                 // deprecated; 8 (envelope) is never advertised. Skipped.
                 5 => {
                     try expect(t.typ, .bytes);
+                    const value = try NetworkMap.decode(alloc, try d.consumeBytes());
                     if (m.network_map) |*n| n.deinit(alloc);
-                    m.network_map = try NetworkMap.decode(alloc, try d.consumeBytes());
+                    m.network_map = value;
                 },
                 6 => {
                     try expect(t.typ, .bytes);
