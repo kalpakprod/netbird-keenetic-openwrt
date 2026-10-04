@@ -459,10 +459,10 @@ pub const DecodedString = struct {
 };
 
 /// HPACK decoder over one connection. Decoded strings borrow the input
-/// (raw), the static table, or an internal scratch buffer (huffman and
-/// indexed names under incremental indexing); dynamic entries own arena
-/// copies. Decoded field slices stay valid until the next decodeBlock
-/// call on the same decoder.
+/// (raw), the static table, or an internal scratch buffer (huffman,
+/// indexed names, and dynamic-sourced emitted fields); dynamic entries
+/// own arena copies. Decoded field slices stay valid until the next
+/// decodeBlock call on the same decoder.
 pub const Decoder = struct {
     dyn_tab: DynamicTable = DynamicTable.init(initial_header_table_size),
     allowed_max_size: u32 = initial_header_table_size,
@@ -497,7 +497,14 @@ pub const Decoder = struct {
                 const r = try readVarInt(7, block[pos..]);
                 const hf = try d.at(r.value);
                 pos += r.len;
-                emit(context, .{ .name = hf.name, .value = hf.value });
+                if (r.value > static_table.len) {
+                    emit(context, .{
+                        .name = try d.stabilize(hf.name),
+                        .value = try d.stabilize(hf.value),
+                    });
+                } else {
+                    emit(context, .{ .name = hf.name, .value = hf.value });
+                }
             } else if (b & 192 == 64) {
                 pos += try d.parseLiteral(block[pos..], 6, .incremental, context, emit);
             } else if (b & 240 == 0) {
@@ -541,15 +548,14 @@ pub const Decoder = struct {
             // own entry (Go is immune: strings are GC'd). Copy it to the
             // per-block scratch first; values are safe (block or scratch).
             if (r.value > 0) {
-                if (d.scratch_used + name.len > d.scratch.len) {
-                    return Error.StringTooLong;
-                }
-                const out = d.scratch[d.scratch_used..][0..name.len];
-                @memcpy(out, name);
-                d.scratch_used += name.len;
-                name = out;
+                name = try d.stabilize(name);
             }
             try d.dyn_tab.add(name, vs.bytes);
+        } else if (r.value > static_table.len) {
+            // No add happens here, but a later field in the same block may
+            // evict and compact the arena: stabilize the dynamic-borrowed
+            // name the same way.
+            name = try d.stabilize(name);
         }
         emit(context, .{
             .name = name,
@@ -569,6 +575,20 @@ pub const Decoder = struct {
         }
         d.dyn_tab.setMaxSize(@intCast(r.value));
         return r.len;
+    }
+
+    /// Copy a dynamic-table-owned slice to per-block scratch so a later
+    /// add/evict compaction in the same block cannot overwrite an already
+    /// emitted field. Scratch only grows within a block and resets per
+    /// block, so copies stay valid until the next decodeBlock call.
+    fn stabilize(d: *Decoder, s: []const u8) Error![]const u8 {
+        if (d.scratch_used + s.len > d.scratch.len) {
+            return Error.StringTooLong;
+        }
+        const out = d.scratch[d.scratch_used..][0..s.len];
+        @memcpy(out, s);
+        d.scratch_used += s.len;
+        return out;
     }
 
     fn at(d: *Decoder, i: u64) Error!HeaderField {
