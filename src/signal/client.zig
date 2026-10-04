@@ -59,8 +59,7 @@ pub const Client = struct {
     }
 
     /// Unbox an EncryptedMessage into a local Message (remote = sender).
-    /// Public for the ownership regression test (src/signal_ownership_test.zig).
-    pub fn decryptMessage(c: *Client, env_bytes: []const u8) Error!messages.Message {
+    fn decryptMessage(c: *Client, env_bytes: []const u8) Error!messages.Message {
         var env = try messages.EncryptedMessage.decode(c.alloc, env_bytes);
         defer env.deinit(c.alloc);
         const remote = try wgbox.parseKey(env.key);
