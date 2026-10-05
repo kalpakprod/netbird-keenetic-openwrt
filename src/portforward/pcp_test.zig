@@ -169,3 +169,23 @@ test "no gateway and no local are errors" {
     c.setLocal4(.{ 127, 0, 0, 1 });
     try std.testing.expectError(pcp.Error.NoGateway, c.announce());
 }
+
+test "link local gateway sockaddr preserves interface scope" {
+    var c = pcp.Client{};
+    const link_local = [_]u8{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+    c.setGateway6Scoped(link_local, 5);
+    const sa = c.gatewaySockaddr6();
+    try std.testing.expectEqual(@as(u32, 5), sa.scope_id);
+    try std.testing.expectEqual(linux.AF.INET6, sa.family);
+    try std.testing.expectEqual(std.mem.nativeToBig(u16, pcp.port), sa.port);
+    try std.testing.expectEqualSlices(u8, &link_local, &sa.addr);
+    try std.testing.expect(c.gatewaySource6Matches(&sa));
+    var wrong = sa;
+    wrong.scope_id = 6;
+    try std.testing.expect(!c.gatewaySource6Matches(&wrong));
+    c.setGateway6(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 });
+    try std.testing.expectEqual(@as(u32, 0), c.gatewaySockaddr6().scope_id);
+    c.setGateway6Scoped(link_local, 5);
+    c.setGateway4(.{ 127, 0, 0, 1 });
+    try std.testing.expectEqual(@as(u32, 0), c.gateway_scope_id);
+}

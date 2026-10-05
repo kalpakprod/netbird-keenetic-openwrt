@@ -179,6 +179,7 @@ pub const max_nonces = 16;
 /// Port of pcp.Client (single-threaded subset).
 pub const Client = struct {
     gateway_is_v6: bool = false,
+    gateway_scope_id: u32 = 0,
     gateway4: [4]u8 = .{ 0, 0, 0, 0 },
     gateway6: [16]u8 = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
     has_gateway: bool = false,
@@ -198,14 +199,37 @@ pub const Client = struct {
 
     pub fn setGateway4(c: *Client, ip: [4]u8) void {
         c.gateway_is_v6 = false;
+        c.gateway_scope_id = 0;
         c.gateway4 = ip;
         c.has_gateway = true;
     }
 
     pub fn setGateway6(c: *Client, ip: [16]u8) void {
+        c.setGateway6Scoped(ip, 0);
+    }
+
+    /// Preserve the interface index for link-local IPv6 gateways.
+    pub fn setGateway6Scoped(c: *Client, ip: [16]u8, scope_id: u32) void {
         c.gateway_is_v6 = true;
         c.gateway6 = ip;
+        c.gateway_scope_id = scope_id;
         c.has_gateway = true;
+    }
+
+    pub fn gatewaySockaddr6(c: *const Client) linux.sockaddr.in6 {
+        return .{
+            .family = linux.AF.INET6,
+            .port = std.mem.nativeToBig(u16, port),
+            .flowinfo = 0,
+            .addr = c.gateway6,
+            .scope_id = c.gateway_scope_id,
+        };
+    }
+
+    pub fn gatewaySource6Matches(c: *const Client, sa: *const linux.sockaddr.in6) bool {
+        return sa.family == linux.AF.INET6 and
+            sa.scope_id == c.gateway_scope_id and
+            std.mem.eql(u8, &sa.addr, &c.gateway6);
     }
 
     pub fn setLocal4(c: *Client, ip: [4]u8) void {
@@ -283,11 +307,7 @@ pub const Client = struct {
         var sa_len: linux.socklen_t = undefined;
         if (c.gateway_is_v6) {
             const sa: *linux.sockaddr.in6 = @ptrCast(@alignCast(&sab_buf));
-            sa.family = linux.AF.INET6;
-            sa.port = std.mem.nativeToBig(u16, port);
-            sa.flowinfo = 0;
-            sa.addr = c.gateway6;
-            sa.scope_id = 0;
+            sa.* = c.gatewaySockaddr6();
             sa_len = @sizeOf(linux.sockaddr.in6);
         } else {
             const sa: *linux.sockaddr.in = @ptrCast(@alignCast(&sab_buf));
@@ -317,7 +337,7 @@ pub const Client = struct {
         } else {
             if (fam != linux.AF.INET6 or from_len < @sizeOf(linux.sockaddr.in6)) return Error.RecvFailed;
             const sa: *const linux.sockaddr.in6 = @ptrCast(@alignCast(&from_buf));
-            if (!std.mem.eql(u8, &sa.addr, &c.gateway6)) return Error.RecvFailed;
+            if (!c.gatewaySource6Matches(sa)) return Error.RecvFailed;
         }
         return n;
     }
