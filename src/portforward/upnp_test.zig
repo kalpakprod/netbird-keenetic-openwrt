@@ -197,3 +197,8 @@ test "live multicast discover finds fake IGD" {
     }
     try std.testing.expect(n >= 1 and saw_fake);
 }
+
+test "relative control URL resolves against authority" {
+    var out: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("http://127.0.0.1:54321/ctl/ip2", try upnp.resolveControlUrl("", "http://127.0.0.1:54321/desc.xml", "ctl/ip2", &out));
+}
