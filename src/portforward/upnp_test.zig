@@ -197,3 +197,28 @@ test "live multicast discover finds fake IGD" {
     }
     try std.testing.expect(n >= 1 and saw_fake);
 }
+
+fn fixtureEnv(out: []u8) ?[]u8 {
+    var file = std.Io.Dir.openFileAbsolute(tio, "/proc/self/environ", .{ .mode = .read_only }) catch return null;
+    defer file.close(tio);
+    var ebuf: [65536]u8 = undefined;
+    const n = file.readPositionalAll(tio, &ebuf, 0) catch return null;
+    var entries = std.mem.splitScalar(u8, ebuf[0..n], 0);
+    const prefix = "L18_HTTP_FIXTURE=";
+    while (entries.next()) |e| {
+        if (std.mem.startsWith(u8, e, prefix)) {
+            const v = e[prefix.len..];
+            if (v.len == 0 or v.len > out.len) return null;
+            @memcpy(out[0..v.len], v);
+            return out[0..v.len];
+        }
+    }
+    return null;
+}
+
+test "description retries disabled higher rank" {
+    var env_buf: [64]u8 = undefined;
+    _ = fixtureEnv(&env_buf) orelse return error.SkipZigTest;
+    const disc = try upnp.clientFromLocation("http://127.0.0.1:54321/desc.xml", 1000);
+    try std.testing.expectEqualStrings(upnp.urn_ip1, disc.client.urn_buf[0..disc.client.urn_len]);
+}
