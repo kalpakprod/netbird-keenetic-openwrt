@@ -131,6 +131,8 @@ pub const AllowedList = struct {
         const d = p.device;
         // Reserve before changing ownership, so allocation failure is atomic.
         try a.list.ensureUnusedCapacity(allocator, 1);
+        // A successful reserve may move storage before the table reserve fails.
+        errdefer a.items = a.list.items;
         try d.allowed_ips.ensureUnusedCapacity(d.allocator, 1);
         for (d.allowed_ips.items) |*entry| {
             if (entry.cidr.bits == c.bits and entry.cidr.matches(c.net)) {
