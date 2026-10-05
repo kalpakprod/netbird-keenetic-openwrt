@@ -10,6 +10,12 @@ const ipcauth = @import("ipcauth.zig");
 const Identity = ipcauth.Identity;
 const tio = std.testing.io;
 
+test {
+    // The first-capture concurrency tests live in ipcauth.zig next to the
+    // private state they stage; this pulls them into this test run.
+    _ = @import("ipcauth.zig");
+}
+
 test "same user compares accounts only" {
     const cases = [_]struct { a: Identity, b: Identity, want: bool }{
         // Same uid.
