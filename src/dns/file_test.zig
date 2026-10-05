@@ -183,3 +183,31 @@ test "backup apply restore cycle on temp paths" {
     try testing.expectEqual(@as(usize, 1), restored.search_domains.len);
     try testing.expectEqualStrings("home.example.", restored.search_domains[0]);
 }
+
+test "original modes survive recreation on apply and restore" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    for ([_]u32{ 0o600, 0o640 }) |mode| {
+        const tp = tempPaths();
+        defer _ = linux.rmdir(tp.dir.ptr);
+        defer _ = linux.unlink(tp.config.ptr);
+        defer _ = linux.unlink(tp.backup.ptr);
+        const fd = linux.open(tp.config.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true }, mode);
+        try testing.expect(!failed(fd));
+        try testing.expectEqual(@as(usize, 0), linux.fchmod(@intCast(fd), mode));
+        const original = "nameserver 8.8.8.8\n";
+        _ = linux.write(@intCast(fd), original.ptr, original.len);
+        _ = linux.close(@intCast(fd));
+        var fc = file.FileConfigurator{ .alloc = arena.allocator(), .config_path = tp.config, .backup_path = tp.backup };
+        try fc.backup();
+        _ = linux.unlink(tp.config.ptr);
+        try fc.apply(&.{}, "100.100.111.1");
+        var stat: [144]u8 align(8) = undefined;
+        try testing.expectEqual(@as(usize, 0), linux.syscall4(.newfstatat, @bitCast(@as(isize, linux.AT.FDCWD)), @intFromPtr(tp.config.ptr), @intFromPtr(&stat), 0));
+        try testing.expectEqual(mode, std.mem.readInt(u32, stat[if (builtin.cpu.arch == .aarch64) 16 else 24 ..][0..4], .little) & 0o777);
+        _ = linux.unlink(tp.config.ptr);
+        try fc.restore();
+        try testing.expectEqual(@as(usize, 0), linux.syscall4(.newfstatat, @bitCast(@as(isize, linux.AT.FDCWD)), @intFromPtr(tp.config.ptr), @intFromPtr(&stat), 0));
+        try testing.expectEqual(mode, std.mem.readInt(u32, stat[if (builtin.cpu.arch == .aarch64) 16 else 24 ..][0..4], .little) & 0o777);
+    }
+}
