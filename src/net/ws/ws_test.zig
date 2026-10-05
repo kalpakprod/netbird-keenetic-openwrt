@@ -368,3 +368,12 @@ test "live: tls with self-signed ip-san cert" {
     try std.testing.expectEqualSlices(u8, &payload, msg.data);
     conn.close(.normal);
 }
+
+test "one-byte close payload is a protocol error" {
+    var t: TestConn = undefined;
+    try t.init(&.{0x88, 1, 0});
+    defer t.deinit();
+    var buf: [16]u8 = undefined;
+    try std.testing.expectError(ws.Error.ProtocolError, t.c.readMessage(&buf));
+    try std.testing.expectEqual(@as(usize, 0), t.out.written().len);
+}
