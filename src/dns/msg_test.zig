@@ -549,7 +549,11 @@ test "terminal dot IsFqdn matches pinned Go oracle" {
     for (cases) |case| {
         qs[0].name = case.name;
         if (case.accepted) {
-            _ = try msg.pack(a, &m, &buf);
+            const wire = try msg.pack(a, &m, &buf);
+            if (std.mem.eql(u8, case.name, ".") or std.mem.eql(u8, case.name, "host\\\\.")) {
+                const parsed = try msg.unpack(a, wire);
+                try std.testing.expectEqualStrings(case.name, parsed.question[0].name);
+            }
         } else {
             try std.testing.expectError(msg.Error.NotFqdn, msg.pack(a, &m, &buf));
         }
