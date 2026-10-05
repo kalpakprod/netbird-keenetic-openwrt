@@ -9,11 +9,17 @@ const wgbox = @import("../mgmt/wgbox.zig");
 const tio = std.testing.io;
 
 fn getenv(allocator: std.mem.Allocator, key: []const u8) !?[]u8 {
-    var file = std.Io.Dir.openFileAbsolute(tio, "/proc/self/environ", .{ .mode = .read_only }) catch return null;
+    var file = std.Io.Dir.openFileAbsolute(tio, "/proc/self/environ", .{ .mode = .read_only }) catch return error.EnvironmentReadFailed;
     defer file.close(tio);
-    var buf: [16384]u8 = undefined;
-    const n = file.readPositionalAll(tio, &buf, 0) catch return null;
-    var rest = buf[0..n];
+    var data: std.ArrayList(u8) = .empty;
+    defer data.deinit(allocator);
+    var chunk: [4096]u8 = undefined;
+    while (true) {
+        const n = try file.readPositionalAll(tio, &chunk, data.items.len);
+        try data.appendSlice(allocator, chunk[0..n]);
+        if (n < chunk.len) break;
+    }
+    var rest = data.items;
     while (rest.len > 0) {
         const end = std.mem.indexOfScalar(u8, rest, 0) orelse break;
         const entry = rest[0..end];
