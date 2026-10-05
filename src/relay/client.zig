@@ -85,8 +85,17 @@ pub fn Client(comptime Conn: type) type {
             c.conn.close(.normal);
         }
 
-        /// Local subscription cleanup. No wire unsubscribe is sent here.
-        pub fn unsubscribe(c: *Self, dst: msgs.PeerID) void {
+        /// Port of v0.80 peer_subscription.go: send first, then clean up even
+        /// when the transport write fails, returning that error to the caller.
+        pub fn unsubscribe(c: *Self, dst: msgs.PeerID) Error!void {
+            if (!c.subscribed(dst)) return;
+            defer c.removeSubscription(dst);
+            if (c.closed) return error.Closed;
+            const msg = try msgs.marshalPeerIDs(c.wbuf, &.{dst}, .unsubscribe_peer_state);
+            try c.conn.writeMessage(.binary, msg);
+        }
+
+        fn removeSubscription(c: *Self, dst: msgs.PeerID) void {
             for (c.subscriptions.items, 0..) |id, i| {
                 if (std.mem.eql(u8, &id, &dst)) {
                     _ = c.subscriptions.swapRemove(i);
@@ -117,7 +126,7 @@ pub fn Client(comptime Conn: type) type {
             if (c.closed) return error.Closed;
             const added = !c.subscribed(dst);
             if (added) try c.subscriptions.append(c.gpa, dst);
-            errdefer if (added) c.unsubscribe(dst);
+            errdefer if (added) c.removeSubscription(dst);
             const msg = try msgs.marshalPeerIDs(c.wbuf, &.{dst}, .subscribe_peer_state);
             try c.conn.writeMessage(.binary, msg);
         }
