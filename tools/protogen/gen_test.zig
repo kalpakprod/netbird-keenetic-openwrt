@@ -128,3 +128,29 @@ test "generate header carries license by path" {
     const bsd = try gen.generate(arena.allocator(), &file, "client/proto/daemon.proto");
     try expectContains(bsd, "BSD-3-Clause");
 }
+
+test "headers normalize upstream origins and pinned license" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var p = try parser.Parser.init(arena.allocator(), sample);
+    const file = try p.parse();
+    const paths = [_][]const u8{
+        "upstream/netbird/management/proto/job.proto",
+        "/home/user/.cache/release/upstream-v080/signal/proto/job.proto",
+        "upstream-v080/relay/proto/job.proto",
+        "combined/proto/job.proto",
+        "upstream/netbird/shared/management/proto/management.proto",
+        "/cache/upstream-v080/shared/signal/proto/signalexchange.proto",
+    };
+    const origins = [_][]const u8{ "management/proto/job.proto", "signal/proto/job.proto", "relay/proto/job.proto", "combined/proto/job.proto", "shared/management/proto/management.proto", "shared/signal/proto/signalexchange.proto" };
+    for (paths, origins) |path, origin| {
+        const out = try gen.generate(arena.allocator(), &file, path);
+        const expected = try std.fmt.allocPrint(arena.allocator(), "Port of netbird {s} (v0.80.0), AGPL-3.0", .{origin});
+        try expectContains(out, expected);
+        try std.testing.expect(std.mem.indexOf(u8, out, "upstream") == null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "/home/") == null);
+    }
+    const bsd = try gen.generate(arena.allocator(), &file, "/cache/upstream-v080/client/proto/daemon.proto");
+    try expectContains(bsd, "Port of netbird client/proto/daemon.proto (v0.80.0), BSD-3-Clause");
+    try std.testing.expect(std.mem.indexOf(u8, bsd, "/cache/") == null);
+}
