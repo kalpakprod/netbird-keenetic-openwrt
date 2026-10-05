@@ -1132,7 +1132,7 @@ fn emitDecode(g: *Generator, indent: []const u8, order: []const OrderItem) Error
             try g.line("{s}    errdefer for (list_{s}.items) |*en| {{", .{indent, d.raw});
             if (d.map_key == .string or d.map_key == .bytes) try g.line("{s}        if (en.key.len != 0) a.free(en.key);", .{indent});
             if (d.map_value_is_message) try g.line("{s}        en.value.deinit(a);", .{indent}) else if (d.scalar == .string or d.scalar == .bytes) try g.line("{s}        if (en.value.len != 0) a.free(en.value);", .{indent});
-            try g.line("{s}    }}", .{indent});
+            try g.line("{s}    }};", .{indent});
         }
     }
     try g.line("{s}    while (!d.done()) {{", .{indent});
