@@ -1,4 +1,4 @@
-// RFC 6455 WebSocket client, plain TCP or TLS (std.crypto.tls, TLS 1.2/1.3).
+// RFC 6455 WebSocket client, plain TCP or TLS (project TLS client, TLS 1.2/1.3).
 // Scope: opening handshake with Sec-WebSocket-Accept verification, masked
 // client frames, fragmented message reassembly with interleaved control
 // frames, automatic pong on ping, close handling. One frame per write, like
@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const TlsClient = @import("tls");
 
 pub const websocket_guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -101,7 +102,7 @@ pub const Conn = struct {
         stream: std.Io.net.Stream,
         raw_reader: std.Io.net.Stream.Reader,
         raw_writer: std.Io.net.Stream.Writer,
-        tls_client: ?*std.crypto.tls.Client = null,
+        tls_client: ?*TlsClient = null,
         heap: [4][]u8 = .{ &.{}, &.{}, &.{}, &.{} },
     };
 
@@ -269,7 +270,7 @@ pub fn connect(gpa: Allocator, io: std.Io, opts: ConnectOptions) !*Conn {
     // one max-size TLS record.
     const raw_len: usize = switch (tls_mode) {
         .none => 4096,
-        else => std.crypto.tls.Client.min_buffer_len,
+        else => TlsClient.min_buffer_len,
     };
     const read_buf = try gpa.alloc(u8, raw_len);
     errdefer gpa.free(read_buf);
@@ -284,18 +285,18 @@ pub fn connect(gpa: Allocator, io: std.Io, opts: ConnectOptions) !*Conn {
     var input: *std.Io.Reader = &net.raw_reader.interface;
 
     if (tls_mode != .none) {
-        var entropy: [std.crypto.tls.Client.Options.entropy_len]u8 = undefined;
+        var entropy: [TlsClient.Options.entropy_len]u8 = undefined;
         io.random(&entropy);
-        const tls_read_buf = try gpa.alloc(u8, std.crypto.tls.Client.min_buffer_len);
+        const tls_read_buf = try gpa.alloc(u8, TlsClient.min_buffer_len);
         errdefer gpa.free(tls_read_buf);
         const tls_write_buf = try gpa.alloc(u8, 1024);
         errdefer gpa.free(tls_write_buf);
         net.heap[2] = tls_read_buf;
         net.heap[3] = tls_write_buf;
 
-        const client = try gpa.create(std.crypto.tls.Client);
+        const client = try gpa.create(TlsClient);
         errdefer gpa.destroy(client);
-        client.* = try std.crypto.tls.Client.init(
+        client.* = try TlsClient.init(
             &net.raw_reader.interface,
             &net.raw_writer.interface,
             .{
@@ -310,6 +311,7 @@ pub fn connect(gpa: Allocator, io: std.Io, opts: ConnectOptions) !*Conn {
                 .entropy = &entropy,
                 .realtime_now = std.Io.Timestamp.now(io, .real),
             },
+            &.{},
         );
         net.tls_client = client;
         input = &client.reader;
