@@ -189,3 +189,126 @@ test "link local gateway sockaddr preserves interface scope" {
     c.setGateway4(.{ 127, 0, 0, 1 });
     try std.testing.expectEqual(@as(u32, 0), c.gateway_scope_id);
 }
+
+// Real UDP lifecycle fixture adapted from the saved R40 regression harness.
+fn failed(rc: usize) bool {
+    return rc > 0xfffffffffffff000;
+}
+
+fn gatewaySocket() !linux.fd_t {
+    const rc = linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
+    if (failed(rc)) return error.SocketFailed;
+    const fd: linux.fd_t = @intCast(rc);
+    errdefer _ = linux.close(fd);
+    var sa = linux.sockaddr.in{ .family = linux.AF.INET, .port = std.mem.nativeToBig(u16, pcp.port), .addr = @bitCast([_]u8{ 127, 0, 0, 2 }) };
+    if (failed(linux.bind(fd, @ptrCast(&sa), @sizeOf(linux.sockaddr.in)))) return error.BindFailed;
+    return fd;
+}
+
+const Fixture = struct {
+    fd: linux.fd_t,
+    addresses: [2][16]u8,
+    temporary: bool = false,
+    expected_nonce: ?pcp.Nonce = null,
+    requests: usize = 0,
+    nonce_reused: bool = false,
+    err: ?anyerror = null,
+
+    fn run(f: *@This()) void {
+        f.respond() catch |err| { f.err = err; };
+    }
+
+    fn respond(f: *@This()) !void {
+        var first_nonce: pcp.Nonce = undefined;
+        for (0..2) |i| {
+            var pfds = [_]linux.pollfd{.{ .fd = f.fd, .events = linux.POLL.IN }};
+            if (linux.poll(&pfds, 1, 2000) != 1) return error.NoRequest;
+            var req: [128]u8 = undefined;
+            var peer: linux.sockaddr.in = undefined;
+            var peer_len: linux.socklen_t = @sizeOf(linux.sockaddr.in);
+            if (linux.recvfrom(f.fd, &req, req.len, 0, @ptrCast(&peer), &peer_len) != 60) return error.BadFixtureRequest;
+            if (req[0] != 2 or req[1] != 1 or req[36] != 17) return error.BadFixtureRequest;
+            const lifetime = std.mem.readInt(u32, req[4..8], .big);
+            if (!f.temporary) {
+                if ((i == 0 and lifetime != 3600) or (i == 1 and lifetime != 0)) return error.BadFixtureRequest;
+            } else if (lifetime != (if (i == 0) @as(u32, 1) else 0)) return error.BadFixtureRequest;
+            if (lifetime == 0 and std.mem.readInt(u16, req[42..44], .big) != 0) return error.BadFixtureRequest;
+            if (i == 0) first_nonce = req[24..36].* else f.nonce_reused = std.mem.eql(u8, &first_nonce, req[24..36]);
+            if (f.expected_nonce) |nonce| {
+                if (!std.mem.eql(u8, &nonce, req[24..36])) return error.BadFixtureNonce;
+            }
+            var response: [60]u8 = undefined;
+            @memset(&response, 0);
+            response[0] = 2;
+            response[1] = 0x81;
+            response[3] = 0;
+            @memcpy(response[4..8], req[4..8]);
+            std.mem.writeInt(u32, response[8..12], 2000, .big);
+            @memcpy(response[24..36], req[24..36]);
+            response[36] = req[36];
+            @memcpy(response[40..44], req[40..44]);
+            @memcpy(response[44..60], &f.addresses[i]);
+            if (linux.sendto(f.fd, &response, response.len, 0, @ptrCast(&peer), peer_len) != response.len) return error.SendFailed;
+            f.requests += 1;
+        }
+    }
+};
+
+
+const learned_v4 = pcp.mapV4(.{ 203, 0, 113, 9 });
+const learned_v6 = [_]u8{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9 };
+const unspecified_v6 = [_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+const unspecified_v4 = pcp.mapV4(.{ 0, 0, 0, 0 });
+
+fn cacheLifecycle(learned: [16]u8, deleted: [16]u8) !void {
+    const gateway = try gatewaySocket();
+    defer _ = linux.close(gateway);
+    var c = pcp.Client{ .timeout_ms = 500, .retries = 1 };
+    c.setGateway4(.{ 127, 0, 0, 2 });
+    c.setLocal4(.{ 127, 0, 0, 1 });
+    var f = Fixture{ .fd = gateway, .addresses = .{ learned, deleted } };
+    const thread = try std.Thread.spawn(.{}, Fixture.run, .{&f});
+    const created = c.addPortMapping(pcp.proto_udp, 61824, 3600);
+    const removed = c.mapPort(pcp.proto_udp, 61824, 0, null, 0);
+    thread.join();
+    if (f.err) |err| return err;
+    try std.testing.expectEqualSlices(u8, &learned, &(try created).external_ip16);
+    try std.testing.expectEqualSlices(u8, &deleted, &(try removed).external_ip16);
+    try std.testing.expectEqual(@as(usize, 2), f.requests);
+    try std.testing.expect(f.nonce_reused);
+    try std.testing.expectEqual(@as(usize, 0), c.n_nonces);
+    const cached = try c.externalAddress();
+    try std.testing.expectEqualSlices(u8, &learned, &cached);
+}
+
+test "cache lifecycle preserves learned IPv4 after mapped unspecified delete" {
+    try cacheLifecycle(learned_v4, unspecified_v4);
+}
+
+test "cache lifecycle preserves learned IPv6 after plain unspecified delete" {
+    try cacheLifecycle(learned_v6, unspecified_v6);
+}
+
+test "temporary external address returns raw response without caching unspecified" {
+    for ([_][16]u8{ unspecified_v6, unspecified_v4, learned_v6 }) |address| {
+        const gateway = try gatewaySocket();
+        defer _ = linux.close(gateway);
+        var c = pcp.Client{ .timeout_ms = 500, .retries = 1 };
+        c.setGateway4(.{ 127, 0, 0, 2 });
+        c.setLocal4(.{ 127, 0, 0, 1 });
+        var f = Fixture{ .fd = gateway, .temporary = true, .addresses = .{ address, unspecified_v4 } };
+        const thread = try std.Thread.spawn(.{}, Fixture.run, .{&f});
+        const result = c.externalAddress();
+        thread.join();
+        if (f.err) |err| return err;
+        const actual = try result;
+        try std.testing.expectEqualSlices(u8, &address, &actual);
+        try std.testing.expectEqual(!std.mem.eql(u8, &address, &unspecified_v6) and !std.mem.eql(u8, &address, &unspecified_v4), c.has_external);
+        try std.testing.expect(f.nonce_reused);
+        try std.testing.expectEqual(@as(usize, 0), c.n_nonces);
+        if (c.has_external) {
+            const cached = try c.externalAddress();
+            try std.testing.expectEqualSlices(u8, &address, &cached);
+        }
+    }
+}
