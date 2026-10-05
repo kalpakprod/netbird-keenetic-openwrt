@@ -197,3 +197,39 @@ test "live multicast discover finds fake IGD" {
     }
     try std.testing.expect(n >= 1 and saw_fake);
 }
+
+test "gateway mapping shares caller budget" {
+    var gate_buf: [64]u8 = undefined;
+    if (regressionEnv(&gate_buf) == null) return error.SkipZigTest;
+    var c = upnp.Client{ .timeout_ms = 100 };
+    const url = "http://127.0.0.1:54321/ctl/ip2";
+    @memcpy(c.control_url_buf[0..url.len], url); c.control_url_len = url.len;
+    @memcpy(c.urn_buf[0..upnp.urn_ip2.len], upnp.urn_ip2); c.urn_len = upnp.urn_ip2.len;
+    const host = "127.0.0.1";
+    @memcpy(c.device_host_buf[0..host.len], host); c.device_host_len = host.len; c.device_port = 54321;
+    var before: linux.timespec = undefined; var after: linux.timespec = undefined;
+    _ = linux.clock_gettime(.MONOTONIC, &before);
+    _ = c.addPortMapping("udp", 12345, "budget regression", 3600) catch {};
+    _ = linux.clock_gettime(.MONOTONIC, &after);
+    const elapsed = (after.sec - before.sec) * 1000 + @divTrunc(after.nsec - before.nsec, 1_000_000);
+    std.debug.print("caller_timeout_ms=100 mapping_elapsed_ms={d}\n", .{elapsed});
+    try std.testing.expect(elapsed <= 130);
+}
+
+fn regressionEnv(out: []u8) ?[]u8 {
+    var file = std.Io.Dir.openFileAbsolute(tio, "/proc/self/environ", .{ .mode = .read_only }) catch return null;
+    defer file.close(tio);
+    var ebuf: [65536]u8 = undefined;
+    const n = file.readPositionalAll(tio, &ebuf, 0) catch return null;
+    var entries = std.mem.splitScalar(u8, ebuf[0..n], 0);
+    const prefix = "L20_FIXTURE=";
+    while (entries.next()) |e| {
+        if (std.mem.startsWith(u8, e, prefix)) {
+            const v = e[prefix.len..];
+            if (v.len == 0 or v.len > out.len) return null;
+            @memcpy(out[0..v.len], v);
+            return out[0..v.len];
+        }
+    }
+    return null;
+}
