@@ -1057,7 +1057,7 @@ fn emitDecode(g: *Generator, indent: []const u8, order: []const OrderItem) Error
     try g.line("", .{});
     try g.line("{s}pub fn decodeWithDepth(a: std.mem.Allocator, buf: []const u8, depth: u32) DecodeError!@This() {{", .{indent});
     try g.line("{s}    if (depth == 0) return error.RecursionDepth;", .{indent});
-    if (!uses_alloc) try g.line("{s}    _ = a;", .{indent});
+    if (!uses_alloc and order.len == 0) try g.line("{s}    _ = a;", .{indent});
     if (order.len == 0) {
         try g.line("{s}    _ = buf;", .{indent});
         try g.line("{s}    return @This(){{}};", .{indent});
@@ -1065,6 +1065,7 @@ fn emitDecode(g: *Generator, indent: []const u8, order: []const OrderItem) Error
         return;
     }
     try g.line("{s}    var m = @This(){{}};", .{indent});
+    try g.line("{s}    errdefer m.deinit(a);", .{indent});
     try g.line("{s}    var d = wire.Decoder.init(buf);", .{indent});
     // Local accumulation lists for repeated/map fields.
     for (order) |item| {
@@ -1084,6 +1085,15 @@ fn emitDecode(g: *Generator, indent: []const u8, order: []const OrderItem) Error
                 try g.line("{s}    var list_{s}: std.ArrayList({s}_Entry) = .empty;", .{ indent, d.raw, d.raw });
             },
             else => {},
+        }
+    }
+    for (order) |item| {
+        const d = item.field orelse continue;
+        if (d.kind == .repeated_scalar or d.kind == .repeated_string or d.kind == .repeated_message or d.kind == .map) {
+            try g.line("{s}    errdefer list_{s}.deinit(a);", .{ indent, d.raw });
+        }
+        if (d.kind == .repeated_string) {
+            try g.line("{s}    errdefer for (list_{s}.items) |v| if (v.len != 0) a.free(v);", .{ indent, d.raw });
         }
     }
     try g.line("{s}    while (!d.done()) {{", .{indent});
@@ -1123,7 +1133,13 @@ fn emitFieldDecodeArm(g: *Generator, indent: []const u8, d: *const FieldDesc) Er
                 .string, .bytes => {
                     try g.line("{s}{d} => if (tag.typ == .bytes) {{", .{ arm_indent, d.number });
                     try g.line("{s}    const b = try d.consumeBytes();", .{arm_indent});
-                    try g.line("{s}    m.{s} = a.dupe(u8, b) catch return error.OutOfMemory;", .{ arm_indent, d.zig });
+                    try g.line("{s}    const owned = a.dupe(u8, b) catch return error.OutOfMemory;", .{arm_indent});
+                    if (d.kind == .scalar_optional) {
+                        try g.line("{s}    if (m.{s}) |old| if (old.len != 0) a.free(old);", .{ arm_indent, d.zig });
+                    } else {
+                        try g.line("{s}    if (m.{s}.len != 0) a.free(m.{s});", .{ arm_indent, d.zig, d.zig });
+                    }
+                    try g.line("{s}    m.{s} = owned;", .{ arm_indent, d.zig });
                     try g.line("{s}}} else {{", .{arm_indent});
                     try g.line("{s}    {s}", .{ arm_indent, skip });
                     try g.line("{s}}},", .{arm_indent});
@@ -1182,7 +1198,9 @@ fn emitFieldDecodeArm(g: *Generator, indent: []const u8, d: *const FieldDesc) Er
         .repeated_string => {
             try g.line("{s}{d} => if (tag.typ == .bytes) {{", .{ arm_indent, d.number });
             try g.line("{s}    const b = try d.consumeBytes();", .{arm_indent});
-            try g.line("{s}    try list_{s}.append(a, a.dupe(u8, b) catch return error.OutOfMemory);", .{ arm_indent, d.raw });
+            try g.line("{s}    const owned = a.dupe(u8, b) catch return error.OutOfMemory;", .{arm_indent});
+            try g.line("{s}    errdefer a.free(owned);", .{arm_indent});
+            try g.line("{s}    try list_{s}.append(a, owned);", .{ arm_indent, d.raw });
             try g.line("{s}}} else {{", .{arm_indent});
             try g.line("{s}    {s}", .{ arm_indent, skip });
             try g.line("{s}}},", .{arm_indent});
