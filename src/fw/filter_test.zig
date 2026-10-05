@@ -114,6 +114,47 @@ test "filter build errors fail closed" {
     );
 }
 
+// Regression: buildOne builds the mangle spec before the final -j and
+// action args, so an allocator failure in that tail must release the
+// already-built mangle spec. checkAllAllocationFailures is not usable
+// here: failing a list-growth allocation inside SpecBuilder.arg trips
+// its catch/errdefer double free (xreview #60, model.zig) and panics
+// before the sweep reaches these indices. Instead the counting run
+// below finds the total allocation count and the last two allocations
+// (the -j and action arg dupes, the only fallible steps after mangle
+// construction) are failed one at a time; every run must propagate
+// OutOfMemory and free exactly what it allocated.
+fn buildPeerRule(alloc: std.mem.Allocator) !void {
+    const src = [_]model.Prefix{try model.Prefix.parse("10.0.0.1/32")};
+    const dport = model.Port{ .is_range = false, .values = &.{443} };
+    var b = try filter.buildFilterRule(alloc, "wt0", false, &src, .none, .tcp, null, dport, .accept);
+    defer b.deinit(alloc);
+    try std.testing.expect(b.mangle_specs != null);
+}
+
+test "allocation failure after mangle build leaks nothing" {
+    const backing = std.testing.allocator;
+
+    // Unlimited run: the build succeeds and frees everything.
+    try buildPeerRule(backing);
+
+    var counter = std.testing.FailingAllocator.init(backing, .{});
+    try buildPeerRule(counter.allocator());
+    const total = counter.alloc_index;
+    try std.testing.expect(total >= 2);
+
+    for (total - 2..total) |fail_index| {
+        var fa = std.testing.FailingAllocator.init(backing, .{ .fail_index = fail_index });
+        const src = [_]model.Prefix{try model.Prefix.parse("10.0.0.1/32")};
+        const dport = model.Port{ .is_range = false, .values = &.{443} };
+        try std.testing.expectError(
+            error.OutOfMemory,
+            filter.buildFilterRule(fa.allocator(), "wt0", false, &src, .none, .tcp, null, dport, .accept),
+        );
+        try std.testing.expectEqual(fa.allocated_bytes, fa.freed_bytes);
+    }
+}
+
 // --- integration test helpers ---
 
 fn inUserNamespace() bool {

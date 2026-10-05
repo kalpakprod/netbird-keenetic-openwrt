@@ -166,6 +166,10 @@ fn buildOne(
         try g.arg(fwmark.redirected_hex);
         mangle = try g.build();
     }
+    // The mangle spec is owned from here on: a later failure (the -j
+    // and action args, or the specs build) must free it, mirroring the
+    // primary-spec errdefer in buildFilterRule.
+    errdefer if (mangle) |ms| model.freeSpec(alloc, ms);
 
     try b.arg("-j");
     try b.arg(action.str());
