@@ -55,6 +55,8 @@ pub const Error = error{
     BindFailed,
     GetSockNameFailed,
     PollFailed,
+    TunClosed,
+    UdpError,
     RecvFailed,
     NotRunning,
     AlreadyRunning,
@@ -230,6 +232,18 @@ pub const Runtime = struct {
         }
         if (fds[0].revents & linux.POLL.NVAL != 0 or
             (n_fds == 2 and fds[1].revents & linux.POLL.NVAL != 0)) return Error.PollFailed;
+        if (n_fds == 2 and fds[1].revents & (linux.POLL.ERR | linux.POLL.HUP) != 0)
+            return Error.TunClosed;
+        // Consume pending UDP errors with SO_ERROR, then return a terminal
+        // error even for HUP/ERR with SO_ERROR=0. The owner must stop/restart,
+        // never repeatedly treat error-only readiness as a successful tick.
+        if (fds[0].revents & (linux.POLL.ERR | linux.POLL.HUP) != 0) {
+            var socket_error: i32 = 0;
+            var len: linux.socklen_t = @sizeOf(i32);
+            _ = linux.getsockopt(r.sock_fd, linux.SOL.SOCKET, linux.SO.ERROR,
+                @ptrCast(&socket_error), &len);
+            return Error.UdpError;
+        }
         if (fds[0].revents & linux.POLL.IN != 0) try r.drainUdp();
         if (n_fds == 2 and fds[1].revents & linux.POLL.IN != 0) try r.readTun();
         r.dev.pollAll(r.nowNs());

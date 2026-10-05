@@ -579,3 +579,24 @@ test "runtime adapter vs Go WireGuard over tun namespaces" {
     if (!inUserNamespace()) return error.SkipZigTest;
     return roleX();
 }
+
+test "runtime: TUN hangup propagates through poll and run" {
+    var sk: noise.PrivateKey = @splat(0xA5);
+    noise.clamp(&sk);
+    var dev = device.Device.init(std.testing.allocator, tio, sk, .{});
+    defer dev.deinit();
+    var r = runtime.Runtime.init(std.testing.allocator, &dev, .{});
+    try r.start();
+    defer r.stop();
+    var pipes: [2]linux.fd_t = undefined;
+    try std.testing.expect(linux.pipe2(&pipes, .{}) <= max_errno_usize);
+    r.tun = .{ .fd = pipes[0], .name = undefined, .name_len = 0 };
+    _ = linux.close(pipes[1]);
+    var readiness = [1]linux.pollfd{.{ .fd = pipes[0], .events = linux.POLL.IN }};
+    try std.testing.expectEqual(@as(usize, 1), linux.poll(&readiness, 1, 0));
+    try std.testing.expect(readiness[0].revents & linux.POLL.HUP != 0);
+    try std.testing.expect(readiness[0].revents & linux.POLL.IN == 0);
+    try std.testing.expectError(error.TunClosed, r.poll(0));
+    var stop_flag = std.atomic.Value(bool).init(false);
+    try std.testing.expectError(error.TunClosed, r.run(&stop_flag));
+}
