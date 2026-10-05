@@ -501,3 +501,21 @@ test "escaped presentation name uses decoded label length" {
     const parsed = try msg.unpack(a, wire);
     try std.testing.expectEqualStrings(&name, parsed.question[0].name);
 }
+
+
+test "terminal dot must be unescaped FQDN" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var buf: [128]u8 = undefined;
+    var m = msg.Message{};
+    var qs = [_]msg.Question{.{ .name = "host\\.", .type = .a, .class = msg.class_inet }};
+    m.question = &qs;
+    try std.testing.expectError(msg.Error.NotFqdn, msg.pack(a, &m, &buf));
+    for ([_][]const u8{ ".", "host\\\\." }) |name| {
+        qs[0].name = name;
+        const wire = try msg.pack(a, &m, &buf);
+        const parsed = try msg.unpack(a, wire);
+        try std.testing.expectEqualStrings(name, parsed.question[0].name);
+    }
+}

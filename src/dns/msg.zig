@@ -503,6 +503,10 @@ pub const Packer = struct {
     fn packName(p: *Packer, name: []const u8, compress: bool) Error!void {
         if (name.len == 0) return; // miekg: empty name packs nothing
         if (name[name.len - 1] != '.') return Error.NotFqdn;
+        // miekg IsFqdn: an odd backslash run escapes the terminal dot.
+        var terminal: usize = name.len - 1;
+        while (terminal > 0 and name[terminal - 1] == '\\') terminal -= 1;
+        if ((name.len - 1 - terminal) % 2 != 0) return Error.NotFqdn;
 
         var pointer: ?u15 = null;
         var begin: usize = 0; // presentation index of the current label
