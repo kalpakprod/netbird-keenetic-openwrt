@@ -174,29 +174,104 @@ pub fn validateDeviceAuthConfig(cfg: *const DeviceAuthProviderConfig) Error!void
     return;
 }
 
-/// Append login_hint query parameter (appendLoginHint).
-/// Returns owned string; empty uri/hint returns a dupe of uri.
+/// Replace login_hint using Go Query().Set + Values.Encode semantics.
+/// Query keys and values are decoded, invalid pairs discarded, and keys sorted.
+/// Returns an owned string, preserving the fragment and empty hint behavior.
 pub fn appendLoginHint(
     alloc: std.mem.Allocator,
     uri: []const u8,
     login_hint: []const u8,
 ) Error![]u8 {
-    if (uri.len == 0 or login_hint.len == 0) {
+    if (uri.len == 0 or login_hint.len == 0)
         return alloc.dupe(u8, uri) catch Error.OutOfMemory;
+    for (uri) |c| {
+        if (c < 0x20 or c == 0x7f) return alloc.dupe(u8, uri) catch Error.OutOfMemory;
     }
-    const enc_hint = formEncode(alloc, login_hint) catch return Error.OutOfMemory;
-    defer alloc.free(enc_hint);
-    const sep: u8 = if (std.mem.indexOfScalar(u8, uri, '?') != null) '&' else '?';
-    const parts = [_][]const u8{ uri, &[_]u8{sep}, "login_hint=", enc_hint };
-    var len: usize = 0;
-    for (parts) |p| len += p.len;
-    const buf = alloc.alloc(u8, len) catch return Error.OutOfMemory;
-    var off: usize = 0;
-    for (parts) |p| {
-        @memcpy(buf[off .. off + p.len], p);
-        off += p.len;
+    const Pair = struct { key: []u8, value: []u8 };
+    var pairs: std.ArrayList(Pair) = .empty;
+    defer {
+        for (pairs.items) |pair| {
+            alloc.free(pair.key);
+            alloc.free(pair.value);
+        }
+        pairs.deinit(alloc);
     }
-    return buf;
+    const base_end = std.mem.indexOfScalar(u8, uri, '#') orelse uri.len;
+    const base = uri[0..base_end];
+    const q = std.mem.indexOfScalar(u8, base, '?') orelse base.len;
+    // Go net/url rejects the whole raw query before discarding invalid or empty
+    // fields when its separator count implies more than 10000 parameters.
+    if (q < base.len and std.mem.count(u8, base[q + 1 ..], "&") < 10000) {
+        var it = std.mem.splitScalar(u8, base[q + 1 ..], '&');
+        while (it.next()) |pair| {
+            if (pair.len == 0 or std.mem.indexOfScalar(u8, pair, ';') != null) continue;
+            const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
+            const key = (try formDecode(alloc, pair[0..eq])) orelse continue;
+            const value = formDecode(alloc, if (eq < pair.len) pair[eq + 1 ..] else "") catch |err| {
+                alloc.free(key);
+                return err;
+            };
+            if (value == null or std.mem.eql(u8, key, "login_hint")) {
+                alloc.free(key);
+                if (value) |v| alloc.free(v);
+                continue;
+            }
+            pairs.append(alloc, .{ .key = key, .value = value.? }) catch {
+                alloc.free(key);
+                alloc.free(value.?);
+                return Error.OutOfMemory;
+            };
+        }
+    }
+    const hint_key = try alloc.dupe(u8, "login_hint");
+    const hint_value = alloc.dupe(u8, login_hint) catch {
+        alloc.free(hint_key);
+        return Error.OutOfMemory;
+    };
+    pairs.append(alloc, .{ .key = hint_key, .value = hint_value }) catch {
+        alloc.free(hint_key);
+        alloc.free(hint_value);
+        return Error.OutOfMemory;
+    };
+    // Stable sorting preserves the input order of repeated values for a key.
+    std.mem.sort(Pair, pairs.items, {}, struct {
+        fn less(_: void, a: Pair, b: Pair) bool {
+            return std.mem.order(u8, a.key, b.key) == .lt;
+        }
+    }.less);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.appendSlice(alloc, base[0..q]);
+    try out.append(alloc, '?');
+    for (pairs.items, 0..) |pair, i| {
+        const key = try formEncode(alloc, pair.key);
+        defer alloc.free(key);
+        const value = try formEncode(alloc, pair.value);
+        defer alloc.free(value);
+        if (i != 0) try out.append(alloc, '&');
+        try out.appendSlice(alloc, key);
+        try out.append(alloc, '=');
+        try out.appendSlice(alloc, value);
+    }
+    try out.appendSlice(alloc, uri[base_end..]);
+    return out.toOwnedSlice(alloc);
+}
+
+/// Go QueryUnescape: '+' is space and malformed percent escapes reject a pair.
+fn formDecode(alloc: std.mem.Allocator, s: []const u8) Error!?[]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] == '%') {
+            if (s.len - i < 3) return null;
+            const hi = std.fmt.charToDigit(s[i + 1], 16) catch return null;
+            const lo = std.fmt.charToDigit(s[i + 2], 16) catch return null;
+            try out.append(alloc, hi * 16 + lo);
+            i += 2;
+        } else try out.append(alloc, if (s[i] == '+') ' ' else s[i]);
+    }
+    return try out.toOwnedSlice(alloc);
 }
 
 /// Percent-encode a form value (application/x-www-form-urlencoded:
@@ -341,7 +416,7 @@ pub fn parseTokenResponse(
     if (obj.get("token_type")) |v| tok.token_type = try jsonString(alloc, v);
     if (obj.get("expires_in")) |v| tok.expires_in = jsonInt(v);
     tok.use_id_token = cfg.use_id_token;
-    validateTokenAudience(tok.tokenToUse(), cfg.audience) catch return Error.InvalidToken;
+    validateTokenAudience(alloc, tok.tokenToUse(), cfg.audience) catch return Error.InvalidToken;
     // Best-effort email like upstream: prefer the id_token claim, ignore failure.
     const id_src = if (tok.id_token.len != 0) tok.id_token else id_token_hint;
     if (id_src.len != 0) {
@@ -443,7 +518,11 @@ pub fn waitToken(
 /// Signature is NOT verified here; the management server verifies against
 /// the IdP JWKS. Only checks well-formedness and aud claim match.
 /// aud may be a string or an array of strings.
-pub fn validateTokenAudience(token: []const u8, audience: []const u8) Error!void {
+pub fn validateTokenAudience(
+    alloc: std.mem.Allocator,
+    token: []const u8,
+    audience: []const u8,
+) Error!void {
     if (token.len == 0) return Error.InvalidToken;
     var dot_count: usize = 0;
     var first_dot: ?usize = null;
@@ -463,127 +542,38 @@ pub fn validateTokenAudience(token: []const u8, audience: []const u8) Error!void
     var buf: [16 * 1024]u8 = undefined;
     const slice = buf[0..need];
     dec.decode(slice, payload_seg) catch return Error.InvalidToken;
-    // Lightweight claim scan: find "aud" without a full JSON parser so the
-    // check works without allocation. Handles string and string-array forms.
-    return checkAudienceClaim(slice, audience);
+    return checkAudienceClaim(alloc, slice, audience);
 }
 
-fn skipWs(s: []const u8, i: *usize) void {
-    while (i.* < s.len and (s[i.*] == ' ' or s[i.*] == '\t' or s[i.*] == '\n' or s[i.*] == '\r')) : (i.* += 1) {}
-}
-
-fn parseJsonString(s: []const u8, i: *usize, out: *std.ArrayList(u8), alloc: std.mem.Allocator) Error!void {
-    // s[i] == '"'
-    i.* += 1;
-    while (i.* < s.len) {
-        const c = s[i.*];
-        if (c == '"') {
-            i.* += 1;
-            return;
-        }
-        if (c == '\\') {
-            i.* += 1;
-            if (i.* >= s.len) return Error.InvalidToken;
-            const e = s[i.*];
-            switch (e) {
-                '"', '\\', '/' => out.append(alloc, e) catch return Error.OutOfMemory,
-                'n' => out.append(alloc, '\n') catch return Error.OutOfMemory,
-                't' => out.append(alloc, '\t') catch return Error.OutOfMemory,
-                'r' => out.append(alloc, '\r') catch return Error.OutOfMemory,
-                'u' => {
-                    if (i.* + 4 >= s.len) return Error.InvalidToken;
-                    const hex = s[i.* + 1 .. i.* + 5];
-                    const cp = std.fmt.parseInt(u21, hex, 16) catch return Error.InvalidToken;
-                    var tmp: [4]u8 = undefined;
-                    const n = std.unicode.utf8Encode(cp, &tmp) catch return Error.InvalidToken;
-                    out.appendSlice(alloc, tmp[0..n]) catch return Error.OutOfMemory;
-                    i.* += 4;
-                },
-                else => return Error.InvalidToken,
-            }
-            i.* += 1;
-        } else {
-            out.append(alloc, c) catch return Error.OutOfMemory;
-            i.* += 1;
-        }
-    }
-    return Error.InvalidToken;
-}
-
-fn checkAudienceClaim(claims: []const u8, audience: []const u8) Error!void {
-    // Minimal JSON object scan for top-level "aud": string | [string...].
-    var alloc_buf: [512]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&alloc_buf);
-    const alloc = fba.allocator();
-    var i: usize = 0;
-    skipWs(claims, &i);
-    if (i >= claims.len or claims[i] != '{') return Error.InvalidToken;
-    i += 1;
-    var found = false;
-    var matched = false;
-    while (true) {
-        skipWs(claims, &i);
-        if (i >= claims.len) return Error.InvalidToken;
-        if (claims[i] == '}') break;
-        if (claims[i] != '"') return Error.InvalidToken;
-        var key: std.ArrayList(u8) = .empty;
-        defer key.deinit(alloc);
-        try parseJsonString(claims, &i, &key, alloc);
-        skipWs(claims, &i);
-        if (i >= claims.len or claims[i] != ':') return Error.InvalidToken;
-        i += 1;
-        skipWs(claims, &i);
-        const is_aud = std.mem.eql(u8, key.items, "aud");
-        if (i >= claims.len) return Error.InvalidToken;
-        if (claims[i] == '"') {
-            var val: std.ArrayList(u8) = .empty;
-            defer val.deinit(alloc);
-            try parseJsonString(claims, &i, &val, alloc);
-            if (is_aud) {
-                found = true;
-                if (std.mem.eql(u8, val.items, audience)) matched = true;
-            }
-        } else if (claims[i] == '[') {
-            i += 1;
-            var arr_match = false;
-            var first = true;
-            while (true) {
-                skipWs(claims, &i);
-                if (i >= claims.len) return Error.InvalidToken;
-                if (claims[i] == ']') {
-                    i += 1;
-                    break;
-                }
-                if (!first) {
-                    if (claims[i] != ',') return Error.InvalidToken;
-                    i += 1;
-                    skipWs(claims, &i);
-                }
-                first = false;
-                if (i >= claims.len or claims[i] != '"') return Error.InvalidToken;
-                var val: std.ArrayList(u8) = .empty;
-                defer val.deinit(alloc);
-                try parseJsonString(claims, &i, &val, alloc);
-                if (is_aud and std.mem.eql(u8, val.items, audience)) arr_match = true;
-            }
-            if (is_aud) {
-                found = true;
-                if (arr_match) matched = true;
-            }
-        } else {
+/// Match the "aud" claim against the expected audience. Parsed with the
+/// real JSON parser, so normal payloads (numeric exp/iat/nbf, bool/null
+/// claims, objects, unknown fields) do not break the check; only malformed
+/// JSON and a missing/non-string/unmatched aud fail (upstream unmarshals
+/// Claims and switches on Audience: string or array of strings).
+fn checkAudienceClaim(alloc: std.mem.Allocator, claims: []const u8, audience: []const u8) Error!void {
+    const parsed = std.json.parseFromSlice(std.json.Value, alloc, claims, .{}) catch return Error.InvalidToken;
+    defer parsed.deinit();
+    if (parsed.value != .object) return Error.InvalidToken;
+    const aud_v = parsed.value.object.get("aud") orelse return Error.InvalidToken;
+    switch (aud_v) {
+        .string => |s| {
+            if (std.mem.eql(u8, s, audience)) return;
             return Error.InvalidToken;
-        }
-        skipWs(claims, &i);
-        if (i < claims.len and claims[i] == ',') {
-            i += 1;
-            continue;
-        }
-        if (i < claims.len and claims[i] == '}') break;
-        if (i >= claims.len) return Error.InvalidToken;
-        return Error.InvalidToken;
+        },
+        .array => |arr| {
+            for (arr.items) |item| {
+                switch (item) {
+                    .string => |s| {
+                        if (std.mem.eql(u8, s, audience)) return;
+                    },
+                    else => {},
+                }
+            }
+            return Error.InvalidToken;
+        },
+        // null/number/bool/object aud: the upstream switch rejects them too.
+        else => return Error.InvalidToken,
     }
-    if (!found) return Error.InvalidToken;
-    if (!matched) return Error.InvalidToken;
 }
 
 /// Extract email (or name fallback) claim from an ID token without
@@ -637,10 +627,14 @@ pub const PendingFlow = struct {
         p.lock.store(0, .release);
     }
 
-    /// Store flow info with absolute expiry (Set). Takes ownership of info.
-    pub fn set(p: *PendingFlow, clock: *const Clock, info: AuthFlowInfo) void {
+    /// Store flow info with absolute expiry (Set). Takes ownership of info;
+    /// any previously stored flow is released first so repeated Request
+    /// flows do not leak. Cannot fail, so the stored state is only replaced
+    /// once the new info is in hand.
+    pub fn set(p: *PendingFlow, alloc: std.mem.Allocator, clock: *const Clock, info: AuthFlowInfo) void {
         p.acquire();
         defer p.release();
+        if (p.has_flow) p.info.deinit(alloc);
         p.has_flow = true;
         p.info = info;
         p.expires_at_s = clock.now_s() + info.expires_in;
@@ -649,19 +643,21 @@ pub const PendingFlow = struct {
     }
 
     /// Copy out stored info for the waiter (Get). Returns false when empty.
-    /// Caller owns the returned copy.
+    /// Caller owns the returned copy. Stages the copy so a failed string
+    /// allocation frees the strings already made (no partial-copy leak).
     pub fn get(p: *PendingFlow, alloc: std.mem.Allocator) Error!?AuthFlowInfo {
         p.acquire();
         defer p.release();
         if (!p.has_flow) return null;
-        return AuthFlowInfo{
-            .device_code = alloc.dupe(u8, p.info.device_code) catch return Error.OutOfMemory,
-            .user_code = alloc.dupe(u8, p.info.user_code) catch return Error.OutOfMemory,
-            .verification_uri = alloc.dupe(u8, p.info.verification_uri) catch return Error.OutOfMemory,
-            .verification_uri_complete = alloc.dupe(u8, p.info.verification_uri_complete) catch return Error.OutOfMemory,
-            .expires_in = p.info.expires_in,
-            .interval = p.info.interval,
-        };
+        var out: AuthFlowInfo = .{};
+        errdefer out.deinit(alloc);
+        out.device_code = alloc.dupe(u8, p.info.device_code) catch return Error.OutOfMemory;
+        out.user_code = alloc.dupe(u8, p.info.user_code) catch return Error.OutOfMemory;
+        out.verification_uri = alloc.dupe(u8, p.info.verification_uri) catch return Error.OutOfMemory;
+        out.verification_uri_complete = alloc.dupe(u8, p.info.verification_uri_complete) catch return Error.OutOfMemory;
+        out.expires_in = p.info.expires_in;
+        out.interval = p.info.interval;
+        return out;
     }
 
     pub fn expiresAt(p: *PendingFlow) i64 {
