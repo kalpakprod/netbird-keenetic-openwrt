@@ -290,6 +290,29 @@ test "missing file reports NotFound" {
 }
 
 
+test "header requires at least 480 usable bytes" {
+    var raw: [file.header_len]u8 = undefined;
+    @memset(&raw, 0);
+    @memcpy(raw[0..16], file.magic);
+    raw[18] = 1;
+    raw[19] = 1;
+    std.mem.writeInt(u32, raw[56..60], 1, .big);
+    for ([_]u32{ 512, 1024, 65536 }) |ps| {
+        std.mem.writeInt(u16, raw[16..18], if (ps == 65536) 1 else @intCast(ps), .big);
+        const max_reserve: u8 = if (ps == 512) 32 else 255;
+        for ([_]u8{ 0, max_reserve }) |reserve| {
+            raw[20] = reserve;
+            const h = try file.Header.parse(&raw);
+            try std.testing.expectEqual(ps, try h.pageSize());
+            try std.testing.expectEqual(ps - reserve, try h.usableSize());
+        }
+    }
+    std.mem.writeInt(u16, raw[16..18], 512, .big);
+    raw[20] = 33;
+    try std.testing.expectError(file.Error.Corrupt, file.Header.parse(&raw));
+    try std.testing.expectError(file.Error.Corrupt, (file.Header{ .raw = raw }).usableSize());
+}
+
 test "all page APIs validate SQLite geometry" {
     const alloc = std.testing.allocator;
     const root = try scratchRoot(alloc);
