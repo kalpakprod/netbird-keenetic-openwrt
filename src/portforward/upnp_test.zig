@@ -197,3 +197,32 @@ test "live multicast discover finds fake IGD" {
     }
     try std.testing.expect(n >= 1 and saw_fake);
 }
+
+fn fixtureEnv(out: []u8) ?[]u8 {
+    var file = std.Io.Dir.openFileAbsolute(tio, "/proc/self/environ", .{ .mode = .read_only }) catch return null;
+    defer file.close(tio);
+    var ebuf: [65536]u8 = undefined;
+    const n = file.readPositionalAll(tio, &ebuf, 0) catch return null;
+    var entries = std.mem.splitScalar(u8, ebuf[0..n], 0);
+    const prefix = "L18_HTTP_FIXTURE=";
+    while (entries.next()) |e| {
+        if (std.mem.startsWith(u8, e, prefix)) {
+            const v = e[prefix.len..];
+            if (v.len == 0 or v.len > out.len) return null;
+            @memcpy(out[0..v.len], v);
+            return out[0..v.len];
+        }
+    }
+    return null;
+}
+
+test "discovered service survives allocator transfer" {
+    var env_buf: [64]u8 = undefined;
+    _ = fixtureEnv(&env_buf) orelse return error.SkipZigTest;
+    const owned = try std.testing.allocator.create(upnp.Discovered);
+    defer std.testing.allocator.destroy(owned);
+    owned.* = try upnp.clientFromLocation("http://127.0.0.1:54321/desc.xml", 1000);
+    // Supported URNs are immutable, so copying the result must not retain a stack slice.
+    try std.testing.expect(owned.service.ptr == upnp.urn_ip2.ptr);
+    try std.testing.expectEqualStrings(upnp.urn_ip2, owned.service);
+}

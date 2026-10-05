@@ -994,5 +994,5 @@ pub fn clientFromLocation(location: []const u8, timeout_ms: i32) Error!Discovere
     c.device_port = u.port;
     const st = try c.natStatus();
     if (!st.nat) return Error.NatDisabled;
-    return .{ .client = c, .service = svc.service_type };
+    return .{ .client = c, .service = switch (serviceRank(svc.service_type)) { 3 => urn_ip2, 2 => urn_ip1, 1 => urn_ppp1, else => unreachable } };
 }
