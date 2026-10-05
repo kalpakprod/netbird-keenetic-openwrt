@@ -418,7 +418,7 @@ fn varintExpr(g: *Generator, d: *const FieldDesc, access: []const u8) Error![]co
 /// Byte-size term for one scalar value (after the tag).
 fn scalarSizeTerm(g: *Generator, d: *const FieldDesc, access: []const u8) Error![]const u8 {
     return switch (d.scalar) {
-        .boolean, .int32, .int64, .uint32, .uint64, .sint32, .sint64 => varintExpr(g, d, access) catch |e| return e,
+        .boolean, .int32, .int64, .uint32, .uint64, .sint32, .sint64 => g.fmt("wire.sizeVarint({s})", .{try varintExpr(g, d, access)}),
         .fixed32, .sfixed32, .float => g.dup("4"),
         .fixed64, .sfixed64, .double => g.dup("8"),
         .string, .bytes => g.fmt("wire.sizeBytes({s}.len)", .{access}),
