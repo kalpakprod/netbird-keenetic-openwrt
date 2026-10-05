@@ -410,7 +410,6 @@ fn tcpConnect(host: []const u8, port: u16, timeout_ms: i32) Error!linux.fd_t {
     };
     const rc = linux.connect(fd, @ptrCast(&sa), @sizeOf(linux.sockaddr.in));
     if (!failed(rc)) {
-        _ = linux.fcntl(fd, linux.F.SETFL, flags);
         return fd;
     }
     // -errno sits in rc; EINPROGRESS is the expected async outcome.
@@ -423,7 +422,6 @@ fn tcpConnect(host: []const u8, port: u16, timeout_ms: i32) Error!linux.fd_t {
     var so_len: linux.socklen_t = 4;
     if (failed(linux.getsockopt(fd, linux.SOL.SOCKET, linux.SO.ERROR, @ptrCast(&so_err), &so_len))) return Error.ConnectFailed;
     if (so_err != 0) return Error.ConnectFailed;
-    if (failed(linux.fcntl(fd, linux.F.SETFL, flags))) return Error.ConnectFailed;
     return fd;
 }
 
@@ -434,15 +432,21 @@ fn httpRoundTrip(
     resp_buf: []u8,
     timeout_ms: i32,
 ) Error!struct { status: u16, body: []u8 } {
+    const deadline = nowMs() + timeout_ms;
     const fd = try tcpConnect(host, port, timeout_ms);
     defer _ = linux.close(fd);
     var off: usize = 0;
     while (off < request.len) {
-        const n = linux.sendto(fd, request[off..].ptr, request.len - off, 0, null, 0);
+        const left = deadline - nowMs();
+        if (left <= 0) return Error.Timeout;
+        var writable = [_]linux.pollfd{.{ .fd = fd, .events = linux.POLL.OUT }};
+        const ready = linux.poll(&writable, 1, @intCast(left));
+        if (ready == 0) return Error.Timeout;
+        if (failed(ready)) return Error.SendFailed;
+        const n = linux.sendto(fd, request[off..].ptr, request.len - off, linux.MSG.NOSIGNAL, null, 0);
         if (failed(n) or n == 0) return Error.SendFailed;
         off += n;
     }
-    const deadline = nowMs() + timeout_ms;
     var len: usize = 0;
     var header_end: ?usize = null;
     var content_len: ?usize = null;
@@ -803,16 +807,15 @@ pub const Client = struct {
         }
     }
 
-    fn soap(
-        c: *Client,
-        action: []const u8,
-        args: []const SoapArg,
-        resp_buf: []u8,
-    ) Error![]u8 {
+    fn soapWithTimeout(c: *Client, action: []const u8, args: []const SoapArg, resp_buf: []u8, timeout_ms: i32) Error![]u8 {
         var body_buf: [2048]u8 = undefined;
         const body = try buildSoapCall(&body_buf, c.urn(), action, args);
         var req_buf: [4096]u8 = undefined;
-        return httpPostSoap(c.controlUrl(), c.urn(), action, body, &req_buf, resp_buf, c.timeout_ms);
+        return httpPostSoap(c.controlUrl(), c.urn(), action, body, &req_buf, resp_buf, timeout_ms);
+    }
+
+    fn soap(c: *Client, action: []const u8, args: []const SoapArg, resp_buf: []u8) Error![]u8 {
+        return c.soapWithTimeout(action, args, resp_buf, c.timeout_ms);
     }
 
     /// Port of GetNATRSIPStatusCtx use: (rsip_available, nat_enabled).
@@ -875,6 +878,7 @@ pub const Client = struct {
             true
         else
             return Error.InvalidProtocol;
+        const deadline = nowMs() + c.timeout_ms;
         const local = try c.internalAddress();
         var local_buf: [16]u8 = undefined;
         const local_s = std.fmt.bufPrint(&local_buf, "{d}.{d}.{d}.{d}", .{ local[0], local[1], local[2], local[3] }) catch return Error.NoSpace;
@@ -882,6 +886,7 @@ pub const Client = struct {
         const int_s = std.fmt.bufPrint(&int_buf, "{d}", .{internal}) catch return Error.NoSpace;
         var lease_buf: [16]u8 = undefined;
         const lease_s_str = std.fmt.bufPrint(&lease_buf, "{d}", .{lease_s}) catch return Error.NoSpace;
+        const remaining = struct { fn get(d: i64) Error!i32 { const left = d - nowMs(); if (left <= 0) return Error.Timeout; return @intCast(@min(left, std.math.maxInt(i32))); } }.get;
 
         if (c.cachedExt(is_tcp, internal)) |ext| {
             var ext_buf: [8]u8 = undefined;
@@ -897,7 +902,7 @@ pub const Client = struct {
                 .{ .name = "NewLeaseDuration", .val = lease_s_str },
             };
             var resp_buf: [4096]u8 = undefined;
-            if (c.soap("AddPortMapping", &args, &resp_buf)) |_| {
+            if (c.soapWithTimeout("AddPortMapping", &args, &resp_buf, try remaining(deadline))) |_| {
                 return ext;
             } else |_| {
                 // Renew failed: fall through to a fresh random port like Go.
@@ -921,7 +926,7 @@ pub const Client = struct {
                 .{ .name = "NewLeaseDuration", .val = lease_s_str },
             };
             var resp_buf: [4096]u8 = undefined;
-            _ = c.soap("AddPortMapping", &args, &resp_buf) catch |err| {
+            _ = c.soapWithTimeout("AddPortMapping", &args, &resp_buf, remaining(deadline) catch |err| { last_err = err; break; }) catch |err| {
                 last_err = err;
                 continue;
             };
