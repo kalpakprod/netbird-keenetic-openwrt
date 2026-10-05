@@ -42,7 +42,7 @@ pub fn putVarint(bytes: []u8, v: u64) Error!usize {
 pub fn serialTypeFor(value: Value) Error!u64 {
     return switch (value) {
         .null => 0,
-        .real => 7,
+        .real => |f| if (std.math.isNan(f)) 0 else 7,
         .integer => |v| blk: {
             if (v == 0) break :blk 8;
             if (v == 1) break :blk 9;
@@ -78,7 +78,8 @@ pub fn sizeOf(t: u64) Error!usize {
 fn add(x: usize, y: usize) Error!usize {
     return std.math.add(usize, x, y) catch error.TooLarge;
 }
-/// Caller owns returned bytes. REAL stays REAL, including signed zero. SQLite's
+/// Caller owns returned bytes. NaN becomes NULL. Other REAL values stay REAL,
+/// including signed zero. SQLite's
 /// SQL affinity processing belongs above this codec, not in serialTypeFor.
 pub fn encode(allocator: std.mem.Allocator, values: []const Value) ![]u8 {
     var types_size: usize = 0;
@@ -165,7 +166,10 @@ pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) ![]Value {
             1...7 => blk: {
                 var bits: u64 = 0;
                 for (data) |byte| bits = (bits << 8) | byte;
-                if (t.value == 7) break :blk .{ .real = @bitCast(bits) };
+                if (t.value == 7) {
+                    const f: f64 = @bitCast(bits);
+                    break :blk if (std.math.isNan(f)) .null else .{ .real = f };
+                }
                 if (size < 8 and data[0] & 128 != 0) bits |= std.math.maxInt(u64) ^ (@as(u64, 1) << @as(u6, @intCast(size * 8))) - 1;
                 break :blk .{ .integer = @bitCast(bits) };
             },
