@@ -474,3 +474,30 @@ test "pack rejects bad names" {
     const parsed = try msg.unpack(a, wire);
     try std.testing.expectEqualStrings(".", parsed.question[0].name);
 }
+
+test "escaped presentation name uses decoded label length" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var m = msg.Message{ .header = .{ .id = 7 } };
+    const questions = try a.alloc(msg.Question, 1);
+    m.question = questions;
+
+    // The presentation label is 64 bytes (32 escaped dots), but its wire
+    // label is 32 bytes and is legal. The final dot terminates the FQDN.
+    var name: [65]u8 = undefined;
+    var i: usize = 0;
+    var j: usize = 0;
+    while (j < 32) : (j += 1) {
+        name[i] = '\\';
+        name[i + 1] = '.';
+        i += 2;
+    }
+    name[i] = '.';
+    questions[0] = .{ .name = &name, .type = .a, .class = msg.class_inet };
+
+    var buf: [128]u8 = undefined;
+    const wire = try msg.pack(a, &m, &buf);
+    const parsed = try msg.unpack(a, wire);
+    try std.testing.expectEqualStrings(&name, parsed.question[0].name);
+}
