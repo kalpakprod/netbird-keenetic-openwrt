@@ -498,3 +498,28 @@ test "local reset releases slots and discards in-flight DATA" {
     try std.testing.expectEqual(@as(i64, frame.initial_window_size), c.conn_recv_window);
     _ = try c.writeHeaders(&.{.{ .name = ":method", .value = "POST" }}, false);
 }
+
+
+test "crossing reset is discarded but active reset remains visible" {
+    const alloc = std.testing.allocator;
+    const stale = try frameBytes(alloc, .rst_stream, 0, 1, &.{ 0, 0, 0, 8 });
+    defer alloc.free(stale);
+    const response = try frameBytes(alloc, .headers, 4, 3, &.{0x88});
+    defer alloc.free(response);
+    const active = try frameBytes(alloc, .rst_stream, 0, 3, &.{ 0, 0, 0, 8 });
+    defer alloc.free(active);
+    const wire = try std.mem.concat(alloc, u8, &.{ stale, response, active });
+    defer alloc.free(wire);
+    var p = Pipe{ .inbound = wire };
+    var c = conn.Conn.init(p.transport());
+    const sid = try c.writeHeaders(&.{.{ .name = ":method", .value = "POST" }}, false);
+    try c.resetStream(sid, .cancel);
+    const next = try c.writeHeaders(&.{.{ .name = ":method", .value = "POST" }}, false);
+    try std.testing.expectEqual(@as(u32, 3), next);
+    try std.testing.expect((try c.readNext()) == null);
+    const headers = (try c.readNext()).?.response_headers;
+    try std.testing.expectEqual(next, headers.stream_id);
+    const reset = (try c.readNext()).?.rst;
+    try std.testing.expectEqual(next, reset.stream_id);
+    try std.testing.expectEqual(frame.ErrCode.cancel, reset.code);
+}
