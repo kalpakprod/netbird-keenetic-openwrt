@@ -94,6 +94,7 @@ pub const Conn = struct {
     net: ?*NetState,
     scratch: []u8,
     close_sent: bool = false,
+    stream_closed: bool = false,
 
     /// Owns the socket and TLS state for connect()-built connections; tests
     /// inject reader/writer pairs instead and leave this null.
@@ -233,13 +234,16 @@ pub const Conn = struct {
             std.mem.writeInt(u16, &payload, @backingInt(code), .big);
             c.writeFrame(.close, &payload) catch {};
         }
-        if (c.net) |n| n.stream.close(c.io);
+        if (c.net) |n| {
+            if (!c.stream_closed) n.stream.close(c.io);
+            c.stream_closed = true;
+        }
     }
 
     pub fn destroy(c: *Conn) void {
         const gpa = c.gpa;
         if (c.net) |n| {
-            n.stream.close(c.io);
+            if (!c.stream_closed) n.stream.close(c.io);
             if (n.tls_client) |t| gpa.destroy(t);
             for (n.heap) |buf| if (buf.len > 0) gpa.free(buf);
             gpa.destroy(n);

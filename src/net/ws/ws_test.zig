@@ -368,3 +368,17 @@ test "live: tls with self-signed ip-san cert" {
     try std.testing.expectEqualSlices(u8, &payload, msg.data);
     conn.close(.normal);
 }
+
+test "live: destroy closes stream without close" {
+    const bin = try goHelperPath();
+    defer std.testing.allocator.free(bin);
+    var server: GoServer = undefined;
+    const dir = (try getenv(std.testing.allocator, "NB_WS_TEST_TLS")) orelse return error.SkipZigTest;
+    defer std.testing.allocator.free(dir);
+    try server.start(bin, "tls", dir);
+    defer server.stop() catch {};
+    const conn = try ws.connect(std.testing.allocator, tio, .{ .host = "127.0.0.1", .port = server.port, .tls = .self_signed, .path = "/relay" });
+    const fd = conn.net.?.stream.socket.handle;
+    conn.destroy();
+    try std.testing.expectEqual(std.os.linux.E.BADF, std.os.linux.errno(std.os.linux.fcntl(fd, std.os.linux.F.GETFD, 0)));
+}
