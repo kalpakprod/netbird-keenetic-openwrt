@@ -406,3 +406,28 @@ test "service selection borrows endpoint and never retains setup key or profile"
     try std.testing.expect(sc.adapter.auth == null);
     try std.testing.expect(sc.adapter.mgmt_client == null and sc.adapter.sig_client == null);
 }
+
+test "signal connect allocation failure preserves OutOfMemory and rolls back" {
+    const alloc = std.testing.allocator;
+    var probe = HandshakeProbe{};
+    const sc = try client_service.ServiceContext.create(alloc, tio, testConfig(null), .{ .ctx = &probe, .dialFn = HandshakeProbe.dial });
+    defer sc.destroy();
+    probe.sc = sc;
+    sc.adapter.auth = .{
+        .signal_uri = try alloc.dupe(u8, "local-signal"),
+        .peer_address = try alloc.dupe(u8, "100.120.0.1/16"),
+    };
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    sc.adapter.alloc = failing.allocator();
+    defer sc.adapter.alloc = alloc;
+    const svc = backendFor(sc, "local-management");
+    const result = svc.startFn(svc.ctx);
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 1), probe.closes);
+    try std.testing.expect(sc.adapter.sig_transport == null and sc.adapter.sig_conn == null);
+    try std.testing.expect(sc.adapter.sig_client == null and sc.adapter.sig_stream == null);
+    try std.testing.expect(sc.adapter.mgmt_transport == null and !sc.adapter.wg_started);
+    svc.stopFn(svc.ctx);
+    try std.testing.expectEqual(@as(usize, 1), probe.closes);
+    try std.testing.expectError(error.OutOfMemory, result);
+}
