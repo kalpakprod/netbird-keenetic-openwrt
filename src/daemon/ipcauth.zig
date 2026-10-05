@@ -57,23 +57,73 @@ pub const error_meta_summary = "summary";
 pub const error_meta_command = "command";
 
 // This process's identity, captured once because it cannot change (upstream
-// captures in package init). selfMayDelegate additionally requires this
-// process to be unprivileged: see mayDelegate. On Linux reading it cannot
-// fail (upstream self_unix.go returns no error), so there is no selfKnown
-// flag; the parameterized isPrivilegedCallerWith/isDaemonSelfWith keep the
-// decision testable.
+// captures in package init, before any concurrency). selfMayDelegate
+// additionally requires this process to be unprivileged: see mayDelegate. On
+// Linux reading it cannot fail (upstream self_unix.go returns no error), so
+// there is no selfKnown flag; the parameterized
+// isPrivilegedCallerWith/isDaemonSelfWith keep the decision testable.
+//
+// One-time publication across the daemon's IPC workers: self_state is the
+// initializer protocol. The winner of the idle->capturing CAS is the only
+// writer of self_id/self_may_delegate, and its release store of .ready is
+// the publication; every other caller's acquire load of .ready (the fast
+// path, or after waiting out a capture in progress) is what makes the pair
+// visible to that caller's later plain reads. No caller ever sees a
+// half-published identity, the capture (two id syscalls over constant state)
+// runs exactly once, and the steady path costs one acquire load with no
+// syscall.
+const CaptureState = enum(u32) { idle, capturing, ready };
+
 var self_id: Identity = .{};
 var self_may_delegate = false;
-var self_captured = std.atomic.Value(bool).init(false);
+var self_state = std.atomic.Value(CaptureState).init(.idle);
 
 fn ensureSelfCaptured() void {
-    if (self_captured.load(.acquire)) return;
-    const id = currentProcessIdentity();
-    // Concurrent duplicate capture writes the same values (the id is a
-    // syscall snapshot of constant state); the release store publishes them.
-    self_id = id;
-    self_may_delegate = mayDelegate(id);
-    self_captured.store(true, .release);
+    if (self_state.load(.acquire) == .ready) return;
+
+    if (self_state.cmpxchgStrong(.idle, .capturing, .acquire, .monotonic) == null) {
+        // This thread owns the one-time capture and its publication.
+        selfCaptureTestPoint();
+        const id = currentProcessIdentity();
+        self_id = id;
+        self_may_delegate = mayDelegate(id);
+        self_state.store(.ready, .release);
+        return;
+    }
+
+    // Another thread holds the capture: wait out its publication rather than
+    // capture on our own; the acquire loads re-publish the pair here.
+    while (self_state.load(.acquire) != .ready) {
+        if (self_capture_test_gate) |gate| gate.waiter_seen.store(true, .release);
+        std.Thread.yield() catch {};
+        std.atomic.spinLoopHint();
+    }
+}
+
+// Test support for the first-capture concurrency tests at the bottom of this
+// file: while a test has registered a gate here, the capturing thread
+// announces itself on `entered` and pauses until `open` (so the test can
+// stage a concurrent first call against a held capture), `wins` counts the
+// threads that won the capture, and `waiter_seen` marks a caller that met
+// the capture in progress. Production leaves the gate null and pays a null
+// check on paths that run once per process (or only inside the first-capture
+// window).
+const SelfCaptureGate = struct {
+    entered: std.atomic.Value(bool) = .init(false),
+    open: std.atomic.Value(bool) = .init(true),
+    wins: std.atomic.Value(u32) = .init(0),
+    waiter_seen: std.atomic.Value(bool) = .init(false),
+};
+var self_capture_test_gate: ?*SelfCaptureGate = null;
+
+fn selfCaptureTestPoint() void {
+    const gate = self_capture_test_gate orelse return;
+    _ = gate.wins.fetchAdd(1, .monotonic);
+    gate.entered.store(true, .release);
+    while (!gate.open.load(.acquire)) {
+        std.Thread.yield() catch {};
+        std.atomic.spinLoopHint();
+    }
 }
 
 /// Whether a daemon running as `id` may extend its authority to callers
@@ -216,4 +266,133 @@ pub fn peerIdentity(fd: std.posix.fd_t) PeerIdentityError!Identity {
     // peer reports zeros) must not be surfaced: uid 0 would read as root.
     if (cred.pid == 0) return error.NoPeerCredentials;
     return .{ .uid = cred.uid, .gid = cred.gid, .pid = cred.pid };
+}
+
+// ---------------------------------------------------------------------------
+// First-capture concurrency tests. They stage the private initializer
+// protocol under simultaneous first calls, which the public surface alone
+// cannot observe, so they live here for that access; ipcauth_test.zig pulls
+// them into its run.
+// ---------------------------------------------------------------------------
+
+test "first capture under simultaneous first calls publishes exactly once" {
+    if (std.os.linux.geteuid() == 0) return error.SkipZigTest;
+
+    var gate: SelfCaptureGate = .{};
+    self_capture_test_gate = &gate;
+    self_state.store(.idle, .monotonic);
+    self_id = .{};
+    self_may_delegate = false;
+    defer self_capture_test_gate = null;
+
+    const Caller = struct {
+        start: *std.atomic.Value(bool),
+        verdict: bool = false,
+        fn run(c: *@This()) void {
+            while (!c.start.load(.acquire)) {
+                std.Thread.yield() catch {};
+            }
+            c.verdict = isPrivilegedCaller(Identity{ .uid = 9999 });
+        }
+    };
+    var start = std.atomic.Value(bool).init(false);
+    var callers: [8]Caller = undefined;
+    var threads: [8]std.Thread = undefined;
+    var spawned: usize = 0;
+    var joined = false;
+    defer {
+        start.store(true, .release);
+        if (!joined) {
+            for (threads[0..spawned]) |t| t.join();
+        }
+    }
+    for (&callers, &threads) |*caller, *t| {
+        caller.* = .{ .start = &start };
+        t.* = std.Thread.spawn(.{}, Caller.run, .{caller}) catch return error.SkipZigTest;
+        spawned += 1;
+    }
+    // Release the whole group at once, so the first calls overlap.
+    start.store(true, .release);
+    for (threads[0..spawned]) |t| t.join();
+    joined = true;
+
+    // Whatever the interleaving: the capture ran once, every caller's verdict
+    // came from that one published pair, and the protocol is at rest.
+    try std.testing.expectEqual(@as(u32, 1), gate.wins.load(.monotonic));
+    const expected = isPrivilegedCaller(Identity{ .uid = 9999 });
+    for (&callers) |*caller| try std.testing.expectEqual(expected, caller.verdict);
+    try std.testing.expectEqual(CaptureState.ready, self_state.load(.monotonic));
+    try std.testing.expectEqual(std.os.linux.geteuid(), self_id.uid);
+}
+
+test "a first call arriving during the capture waits for its publication" {
+    if (std.os.linux.geteuid() == 0) return error.SkipZigTest;
+
+    var gate: SelfCaptureGate = .{ .open = .init(false) };
+    self_capture_test_gate = &gate;
+    self_state.store(.idle, .monotonic);
+    self_id = .{};
+    self_may_delegate = false;
+    defer self_capture_test_gate = null;
+
+    const Call = struct {
+        result: ?Identity = null,
+        fn run(c: *@This()) void {
+            c.result = selfDelegatesTo();
+        }
+    };
+    var capturer: Call = .{};
+    var waiter: Call = .{};
+    var t1: ?std.Thread = null;
+    var t2: ?std.Thread = null;
+    var joined = false;
+    defer {
+        gate.open.store(true, .release);
+        if (!joined) {
+            if (t1) |t| t.join();
+            if (t2) |t| t.join();
+        }
+    }
+
+    t1 = std.Thread.spawn(.{}, Call.run, .{&capturer}) catch return error.SkipZigTest;
+
+    // Hold the capture until the capturing thread says it is inside, then let
+    // a second first call arrive against the held capture.
+    var spins: usize = 0;
+    while (!gate.entered.load(.acquire)) {
+        spins += 1;
+        if (spins > 10_000_000) {
+            gate.open.store(true, .release);
+            t1.?.join();
+            joined = true;
+            return error.TestUnexpectedResult;
+        }
+        std.Thread.yield() catch {};
+    }
+
+    t2 = std.Thread.spawn(.{}, Call.run, .{&waiter}) catch return error.SkipZigTest;
+
+    // The second caller must meet the held capture and fall into its wait,
+    // never capture on its own.
+    spins = 0;
+    while (!gate.waiter_seen.load(.acquire)) {
+        spins += 1;
+        if (spins > 10_000_000) break;
+        std.Thread.yield() catch {};
+    }
+    const one_won_while_held = gate.wins.load(.monotonic) == 1;
+
+    gate.open.store(true, .release);
+    t1.?.join();
+    t2.?.join();
+    joined = true;
+
+    try std.testing.expect(gate.waiter_seen.load(.monotonic));
+    try std.testing.expect(one_won_while_held);
+    try std.testing.expectEqual(@as(u32, 1), gate.wins.load(.monotonic));
+    // Both callers read the published pair, never a half-published state.
+    const for_caller = capturer.result orelse return error.TestUnexpectedResult;
+    const for_waiter = waiter.result orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(std.os.linux.geteuid(), for_caller.uid);
+    try std.testing.expectEqual(self_id.uid, for_waiter.uid);
 }
