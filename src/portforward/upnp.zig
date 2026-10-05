@@ -968,31 +968,28 @@ pub fn clientFromLocation(location: []const u8, timeout_ms: i32) Error!Discovere
     var store: [4096]u8 = undefined;
     var services: [8]Service = undefined;
     const parsed = try parseServices(xml, &store, &services);
-    var best: ?Service = null;
-    var best_rank: u8 = 0;
-    for (services[0..parsed.n]) |s| {
-        const r = serviceRank(s.service_type);
-        if (r > best_rank) {
-            best_rank = r;
-            best = s;
+    var used: [8]bool = @splat(false);
+    for (0..parsed.n) |_| {
+        var best: ?Service = null;
+        var best_i: usize = 0;
+        var best_rank: u8 = 0;
+        for (services[0..parsed.n], 0..) |svc, i| {
+            const r = serviceRank(svc.service_type);
+            if (!used[i] and r > best_rank) { best_rank = r; best = svc; best_i = i; }
         }
+        const svc = best orelse break;
+        used[best_i] = true;
+        var c = Client{ .timeout_ms = timeout_ms };
+        var ctl_buf: [256]u8 = undefined;
+        const ctl = resolveControlUrl(parsed.base, location, svc.control_url, &ctl_buf) catch continue;
+        if (ctl.len > c.control_url_buf.len or svc.service_type.len > c.urn_buf.len) continue;
+        @memcpy(c.control_url_buf[0..ctl.len], ctl); c.control_url_len = ctl.len;
+        @memcpy(c.urn_buf[0..svc.service_type.len], svc.service_type); c.urn_len = svc.service_type.len;
+        const u = parseUrl(ctl) catch continue;
+        if (u.host.len > c.device_host_buf.len) continue;
+        @memcpy(c.device_host_buf[0..u.host.len], u.host); c.device_host_len = u.host.len; c.device_port = u.port;
+        const st = c.natStatus() catch continue;
+        if (st.nat) return .{ .client = c, .service = svc.service_type };
     }
-    const svc = best orelse return Error.NoService;
-    var c = Client{ .timeout_ms = timeout_ms };
-    var ctl_buf: [256]u8 = undefined;
-    const ctl = try resolveControlUrl(parsed.base, location, svc.control_url, &ctl_buf);
-    if (ctl.len > c.control_url_buf.len) return Error.NoSpace;
-    @memcpy(c.control_url_buf[0..ctl.len], ctl);
-    c.control_url_len = ctl.len;
-    if (svc.service_type.len > c.urn_buf.len) return Error.NoSpace;
-    @memcpy(c.urn_buf[0..svc.service_type.len], svc.service_type);
-    c.urn_len = svc.service_type.len;
-    const u = try parseUrl(ctl);
-    if (u.host.len > c.device_host_buf.len) return Error.NoSpace;
-    @memcpy(c.device_host_buf[0..u.host.len], u.host);
-    c.device_host_len = u.host.len;
-    c.device_port = u.port;
-    const st = try c.natStatus();
-    if (!st.nat) return Error.NatDisabled;
-    return .{ .client = c, .service = svc.service_type };
+    return Error.NoService;
 }
