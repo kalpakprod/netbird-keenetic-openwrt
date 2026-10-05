@@ -735,7 +735,8 @@ pub const Transport = struct {
             return Error.MessageLengthMismatch;
         }
         const counter = std.mem.readInt(u64, header[8..16], .little);
-        if (!self.replay.validateCounter(counter, reject_after_messages)) {
+        var replay = self.replay;
+        if (!replay.validateCounter(counter, reject_after_messages)) {
             return Error.Replay;
         }
         var nonce = zero_nonce;
@@ -752,6 +753,7 @@ pub const Transport = struct {
         ) catch {
             return Error.AuthenticationFailed;
         };
+        self.replay = replay;
         return counter;
     }
 };

@@ -294,3 +294,21 @@ test "handshake state machine rejects out-of-order calls" {
         noise.Handshake.init(hexToArray(32, INIT_PRIV), std.mem.zeroes([32]u8), hexToArray(32, PSK_HEX)),
     );
 }
+
+test "transport authentication failure preserves replay state" {
+    const key: [32]u8 = @splat(7);
+    var sender = noise.Transport{ .send_key = key, .receive_key = key, .remote_index = 1, .send_nonce = 10000 };
+    var receiver = noise.Transport{ .send_key = key, .receive_key = key, .remote_index = 1 };
+    const before = receiver.replay;
+    var header: [noise.message_transport_header_size]u8 = undefined;
+    var ciphertext: [3 + noise.tag_size]u8 = undefined;
+    _ = try sender.seal(&header, &ciphertext, "abc");
+    var invalid = ciphertext;
+    invalid[invalid.len - 1] ^= 1;
+    var plaintext: [3]u8 = undefined;
+    try std.testing.expectError(noise.Error.AuthenticationFailed, receiver.open(&plaintext, &header, &invalid));
+    try std.testing.expectEqualDeep(before, receiver.replay);
+    try std.testing.expectEqual(@as(u64, 10000), try receiver.open(&plaintext, &header, &ciphertext));
+    try std.testing.expectEqualSlices(u8, "abc", &plaintext);
+    try std.testing.expectError(noise.Error.Replay, receiver.open(&plaintext, &header, &ciphertext));
+}
