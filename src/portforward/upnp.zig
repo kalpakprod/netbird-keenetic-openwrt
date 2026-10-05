@@ -222,27 +222,50 @@ pub fn serviceRank(service_type: []const u8) u8 {
 /// Resolve a controlURL against the description base/location.
 /// Absolute URLs pass through; absolute paths join the location host.
 pub fn resolveControlUrl(base: []const u8, location: []const u8, control: []const u8, out: []u8) Error![]u8 {
-    if (std.mem.startsWith(u8, control, "http://")) {
-        if (control.len > out.len) return Error.NoSpace;
-        @memcpy(out[0..control.len], control);
-        return out[0..control.len];
+    const absolute = std.mem.indexOf(u8, control, "://") != null;
+    const root = if (absolute) control else if (base.len > 0) base else location;
+    const after_scheme = (std.mem.indexOf(u8, root, "://") orelse return Error.BadUrl) + 3;
+    const auth_end = after_scheme + (std.mem.indexOfAny(u8, root[after_scheme..], "/?#") orelse root.len - after_scheme);
+    const reference = if (absolute) control[auth_end..] else control;
+    const suffix_at = std.mem.indexOfAny(u8, reference, "?#") orelse reference.len;
+    const path = reference[0..suffix_at];
+    const suffix = reference[suffix_at..];
+    // Work in a fixed scratch buffer so NoSpace leaves the caller's output intact.
+    var normalized: [4096]u8 = undefined;
+    var n: usize = 0;
+    var i: usize = 0;
+    if (!std.mem.startsWith(u8, path, "/")) {
+        normalized[0] = '/';
+        n = 1;
     }
-    const root = if (base.len > 0) base else location;
-    // Strip to scheme://authority.
-    const auth_end = blk: {
-        const after_scheme = std.mem.indexOf(u8, root, "://") orelse return Error.BadUrl;
-        const rest = root[after_scheme + 3 ..];
-        if (std.mem.indexOfScalar(u8, rest, '/')) |i| {
-            break :blk after_scheme + 3 + i;
+    // RFC 3986 remove_dot_segments. Query/fragment bytes are never path segments.
+    while (i < path.len) {
+        const rest = path[i..];
+        if (std.mem.startsWith(u8, rest, "../")) { i += 3; continue; }
+        if (std.mem.startsWith(u8, rest, "./")) { i += 2; continue; }
+        if (std.mem.startsWith(u8, rest, "/./")) { i += 2; continue; }
+        if (std.mem.eql(u8, rest, "/.")) { i += 2; if (n == normalized.len) return Error.NoSpace; normalized[n] = '/'; n += 1; continue; }
+        if (std.mem.startsWith(u8, rest, "/../") or std.mem.eql(u8, rest, "/..")) {
+            const terminal = std.mem.eql(u8, rest, "/..");
+            i += 3;
+            if (n > 0) n = std.mem.lastIndexOfScalar(u8, normalized[0..n], '/') orelse 0;
+            if (terminal) { if (n == normalized.len) return Error.NoSpace; normalized[n] = '/'; n += 1; }
+            continue;
         }
-        break :blk root.len;
-    };
-    const root_auth = root[0..auth_end];
-    if (!std.mem.startsWith(u8, control, "/")) return Error.BadUrl;
-    const total = root_auth.len + control.len;
+        if (std.mem.eql(u8, rest, ".") or std.mem.eql(u8, rest, "..")) break;
+        const start = i;
+        if (path[i] == '/') i += 1;
+        while (i < path.len and path[i] != '/') : (i += 1) {}
+        const len = i - start;
+        if (n + len > normalized.len) return Error.NoSpace;
+        @memcpy(normalized[n..][0..len], path[start..i]);
+        n += len;
+    }
+    const total = auth_end + n + suffix.len;
     if (total > out.len) return Error.NoSpace;
-    @memcpy(out[0..root_auth.len], root_auth);
-    @memcpy(out[root_auth.len..total], control);
+    @memcpy(out[0..auth_end], root[0..auth_end]);
+    @memcpy(out[auth_end..][0..n], normalized[0..n]);
+    @memcpy(out[auth_end + n..][0..suffix.len], suffix);
     return out[0..total];
 }
 
@@ -410,7 +433,6 @@ fn tcpConnect(host: []const u8, port: u16, timeout_ms: i32) Error!linux.fd_t {
     };
     const rc = linux.connect(fd, @ptrCast(&sa), @sizeOf(linux.sockaddr.in));
     if (!failed(rc)) {
-        _ = linux.fcntl(fd, linux.F.SETFL, flags);
         return fd;
     }
     // -errno sits in rc; EINPROGRESS is the expected async outcome.
@@ -423,7 +445,6 @@ fn tcpConnect(host: []const u8, port: u16, timeout_ms: i32) Error!linux.fd_t {
     var so_len: linux.socklen_t = 4;
     if (failed(linux.getsockopt(fd, linux.SOL.SOCKET, linux.SO.ERROR, @ptrCast(&so_err), &so_len))) return Error.ConnectFailed;
     if (so_err != 0) return Error.ConnectFailed;
-    if (failed(linux.fcntl(fd, linux.F.SETFL, flags))) return Error.ConnectFailed;
     return fd;
 }
 
@@ -434,15 +455,21 @@ fn httpRoundTrip(
     resp_buf: []u8,
     timeout_ms: i32,
 ) Error!struct { status: u16, body: []u8 } {
+    const deadline = nowMs() + timeout_ms;
     const fd = try tcpConnect(host, port, timeout_ms);
     defer _ = linux.close(fd);
     var off: usize = 0;
     while (off < request.len) {
-        const n = linux.sendto(fd, request[off..].ptr, request.len - off, 0, null, 0);
+        const left = deadline - nowMs();
+        if (left <= 0) return Error.Timeout;
+        var writable = [_]linux.pollfd{.{ .fd = fd, .events = linux.POLL.OUT }};
+        const ready = linux.poll(&writable, 1, @intCast(left));
+        if (ready == 0) return Error.Timeout;
+        if (failed(ready)) return Error.SendFailed;
+        const n = linux.sendto(fd, request[off..].ptr, request.len - off, linux.MSG.NOSIGNAL, null, 0);
         if (failed(n) or n == 0) return Error.SendFailed;
         off += n;
     }
-    const deadline = nowMs() + timeout_ms;
     var len: usize = 0;
     var header_end: ?usize = null;
     var content_len: ?usize = null;
@@ -521,8 +548,13 @@ pub fn httpPostSoap(
     if (head.len + body.len > req_buf.len) return Error.NoSpace;
     @memcpy(req_buf[head.len..][0..body.len], body);
     const r = try httpRoundTrip(u.host, u.port, req_buf[0 .. head.len + body.len], resp_buf, timeout_ms);
-    // goupnp reads the body even on SOAP faults (HTTP 500 with a body).
-    if (r.status != 200 and r.body.len == 0) return Error.BadStatus;
+    // Preserve fault details for the caller, including HTTP 500 code 725.
+    // Client.soap in #80 classifies this body before treating it as success.
+    if (std.mem.indexOf(u8, r.body, "<s:Fault>") != null or
+        std.mem.indexOf(u8, r.body, "<SOAP-ENV:Fault>") != null) return r.body;
+    if (r.status != 200) return Error.BadStatus;
+    if (std.mem.indexOf(u8, r.body, "Envelope") == null or
+        std.mem.indexOf(u8, r.body, "Body") == null) return Error.SoapFault;
     return r.body;
 }
 
@@ -803,16 +835,15 @@ pub const Client = struct {
         }
     }
 
-    fn soap(
-        c: *Client,
-        action: []const u8,
-        args: []const SoapArg,
-        resp_buf: []u8,
-    ) Error![]u8 {
+    fn soapWithTimeout(c: *Client, action: []const u8, args: []const SoapArg, resp_buf: []u8, timeout_ms: i32) Error![]u8 {
         var body_buf: [2048]u8 = undefined;
         const body = try buildSoapCall(&body_buf, c.urn(), action, args);
         var req_buf: [4096]u8 = undefined;
-        return httpPostSoap(c.controlUrl(), c.urn(), action, body, &req_buf, resp_buf, c.timeout_ms);
+        return httpPostSoap(c.controlUrl(), c.urn(), action, body, &req_buf, resp_buf, timeout_ms);
+    }
+
+    fn soap(c: *Client, action: []const u8, args: []const SoapArg, resp_buf: []u8) Error![]u8 {
+        return c.soapWithTimeout(action, args, resp_buf, c.timeout_ms);
     }
 
     /// Port of GetNATRSIPStatusCtx use: (rsip_available, nat_enabled).
@@ -875,6 +906,7 @@ pub const Client = struct {
             true
         else
             return Error.InvalidProtocol;
+        const deadline = nowMs() + c.timeout_ms;
         const local = try c.internalAddress();
         var local_buf: [16]u8 = undefined;
         const local_s = std.fmt.bufPrint(&local_buf, "{d}.{d}.{d}.{d}", .{ local[0], local[1], local[2], local[3] }) catch return Error.NoSpace;
@@ -882,6 +914,7 @@ pub const Client = struct {
         const int_s = std.fmt.bufPrint(&int_buf, "{d}", .{internal}) catch return Error.NoSpace;
         var lease_buf: [16]u8 = undefined;
         const lease_s_str = std.fmt.bufPrint(&lease_buf, "{d}", .{lease_s}) catch return Error.NoSpace;
+        const remaining = struct { fn get(d: i64) Error!i32 { const left = d - nowMs(); if (left <= 0) return Error.Timeout; return @intCast(@min(left, std.math.maxInt(i32))); } }.get;
 
         if (c.cachedExt(is_tcp, internal)) |ext| {
             var ext_buf: [8]u8 = undefined;
@@ -897,7 +930,7 @@ pub const Client = struct {
                 .{ .name = "NewLeaseDuration", .val = lease_s_str },
             };
             var resp_buf: [4096]u8 = undefined;
-            if (c.soap("AddPortMapping", &args, &resp_buf)) |_| {
+            if (c.soapWithTimeout("AddPortMapping", &args, &resp_buf, try remaining(deadline))) |_| {
                 return ext;
             } else |_| {
                 // Renew failed: fall through to a fresh random port like Go.
@@ -921,7 +954,7 @@ pub const Client = struct {
                 .{ .name = "NewLeaseDuration", .val = lease_s_str },
             };
             var resp_buf: [4096]u8 = undefined;
-            _ = c.soap("AddPortMapping", &args, &resp_buf) catch |err| {
+            _ = c.soapWithTimeout("AddPortMapping", &args, &resp_buf, remaining(deadline) catch |err| { last_err = err; break; }) catch |err| {
                 last_err = err;
                 continue;
             };
@@ -968,31 +1001,28 @@ pub fn clientFromLocation(location: []const u8, timeout_ms: i32) Error!Discovere
     var store: [4096]u8 = undefined;
     var services: [8]Service = undefined;
     const parsed = try parseServices(xml, &store, &services);
-    var best: ?Service = null;
-    var best_rank: u8 = 0;
-    for (services[0..parsed.n]) |s| {
-        const r = serviceRank(s.service_type);
-        if (r > best_rank) {
-            best_rank = r;
-            best = s;
+    var used: [8]bool = @splat(false);
+    for (0..parsed.n) |_| {
+        var best: ?Service = null;
+        var best_i: usize = 0;
+        var best_rank: u8 = 0;
+        for (services[0..parsed.n], 0..) |svc, i| {
+            const r = serviceRank(svc.service_type);
+            if (!used[i] and r > best_rank) { best_rank = r; best = svc; best_i = i; }
         }
+        const svc = best orelse break;
+        used[best_i] = true;
+        var c = Client{ .timeout_ms = timeout_ms };
+        var ctl_buf: [256]u8 = undefined;
+        const ctl = resolveControlUrl(parsed.base, location, svc.control_url, &ctl_buf) catch continue;
+        if (ctl.len > c.control_url_buf.len or svc.service_type.len > c.urn_buf.len) continue;
+        @memcpy(c.control_url_buf[0..ctl.len], ctl); c.control_url_len = ctl.len;
+        @memcpy(c.urn_buf[0..svc.service_type.len], svc.service_type); c.urn_len = svc.service_type.len;
+        const u = parseUrl(ctl) catch continue;
+        if (u.host.len > c.device_host_buf.len) continue;
+        @memcpy(c.device_host_buf[0..u.host.len], u.host); c.device_host_len = u.host.len; c.device_port = u.port;
+        const st = c.natStatus() catch continue;
+        if (st.nat) return .{ .client = c, .service = switch (serviceRank(svc.service_type)) { 3 => urn_ip2, 2 => urn_ip1, 1 => urn_ppp1, else => unreachable } };
     }
-    const svc = best orelse return Error.NoService;
-    var c = Client{ .timeout_ms = timeout_ms };
-    var ctl_buf: [256]u8 = undefined;
-    const ctl = try resolveControlUrl(parsed.base, location, svc.control_url, &ctl_buf);
-    if (ctl.len > c.control_url_buf.len) return Error.NoSpace;
-    @memcpy(c.control_url_buf[0..ctl.len], ctl);
-    c.control_url_len = ctl.len;
-    if (svc.service_type.len > c.urn_buf.len) return Error.NoSpace;
-    @memcpy(c.urn_buf[0..svc.service_type.len], svc.service_type);
-    c.urn_len = svc.service_type.len;
-    const u = try parseUrl(ctl);
-    if (u.host.len > c.device_host_buf.len) return Error.NoSpace;
-    @memcpy(c.device_host_buf[0..u.host.len], u.host);
-    c.device_host_len = u.host.len;
-    c.device_port = u.port;
-    const st = try c.natStatus();
-    if (!st.nat) return Error.NatDisabled;
-    return .{ .client = c, .service = svc.service_type };
+    return Error.NoService;
 }

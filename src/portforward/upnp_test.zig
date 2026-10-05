@@ -197,3 +197,108 @@ test "live multicast discover finds fake IGD" {
     }
     try std.testing.expect(n >= 1 and saw_fake);
 }
+
+test "relative control URL resolves against authority" {
+    var out: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("http://127.0.0.1:54321/ctl/ip2", try upnp.resolveControlUrl("", "http://127.0.0.1:54321/desc.xml", "ctl/ip2", &out));
+}
+
+fn fixtureEnv(out: []u8) ?[]u8 {
+    var file = std.Io.Dir.openFileAbsolute(tio, "/proc/self/environ", .{ .mode = .read_only }) catch return null;
+    defer file.close(tio);
+    var ebuf: [65536]u8 = undefined;
+    const n = file.readPositionalAll(tio, &ebuf, 0) catch return null;
+    var entries = std.mem.splitScalar(u8, ebuf[0..n], 0);
+    const prefix = "L18_HTTP_FIXTURE=";
+    while (entries.next()) |e| {
+        if (std.mem.startsWith(u8, e, prefix)) {
+            const v = e[prefix.len..];
+            if (v.len == 0 or v.len > out.len) return null;
+            @memcpy(out[0..v.len], v);
+            return out[0..v.len];
+        }
+    }
+    return null;
+}
+
+test "description retries disabled higher rank" {
+    var env_buf: [64]u8 = undefined;
+    _ = fixtureEnv(&env_buf) orelse return error.SkipZigTest;
+    const disc = try upnp.clientFromLocation("http://127.0.0.1:54321/desc.xml", 1000);
+    try std.testing.expectEqualStrings(upnp.urn_ip1, disc.client.urn_buf[0..disc.client.urn_len]);
+}
+
+
+
+test "discovered service survives allocator transfer" {
+    var env_buf: [64]u8 = undefined;
+    _ = fixtureEnv(&env_buf) orelse return error.SkipZigTest;
+    const owned = try std.testing.allocator.create(upnp.Discovered);
+    defer std.testing.allocator.destroy(owned);
+    owned.* = try upnp.clientFromLocation("http://127.0.0.1:54321/desc.xml", 1000);
+    // Supported URNs are immutable, so copying the result must not retain a stack slice.
+    try std.testing.expect(owned.service.ptr == upnp.urn_ip2.ptr);
+    try std.testing.expectEqualStrings(upnp.urn_ip2, owned.service);
+}
+
+test "SOAP non200 valid envelope is rejected" {
+    var gate_buf: [64]u8 = undefined;
+    if (regressionEnv(&gate_buf) == null) return error.SkipZigTest;
+    var req: [4096]u8 = undefined;
+    var resp: [4096]u8 = undefined;
+    try std.testing.expectError(error.BadStatus, upnp.httpPostSoap("http://127.0.0.1:54321/ctl/ip2", upnp.urn_ip2, "AddPortMapping", "", &req, &resp, 1000));
+}
+
+fn regressionEnv(out: []u8) ?[]u8 {
+    var file = std.Io.Dir.openFileAbsolute(tio, "/proc/self/environ", .{ .mode = .read_only }) catch return null;
+    defer file.close(tio);
+    var ebuf: [65536]u8 = undefined;
+    const n = file.readPositionalAll(tio, &ebuf, 0) catch return null;
+    var entries = std.mem.splitScalar(u8, ebuf[0..n], 0);
+    const prefix = "L20_FIXTURE=";
+    while (entries.next()) |e| {
+        if (std.mem.startsWith(u8, e, prefix)) {
+            const v = e[prefix.len..];
+            if (v.len == 0 or v.len > out.len) return null;
+            @memcpy(out[0..v.len], v);
+            return out[0..v.len];
+        }
+    }
+    return null;
+}
+
+test "gateway mapping shares caller budget" {
+    var gate_buf: [64]u8 = undefined;
+    if (regressionEnv(&gate_buf) == null) return error.SkipZigTest;
+    var c = upnp.Client{ .timeout_ms = 100 };
+    const url = "http://127.0.0.1:54321/ctl/ip2";
+    @memcpy(c.control_url_buf[0..url.len], url); c.control_url_len = url.len;
+    @memcpy(c.urn_buf[0..upnp.urn_ip2.len], upnp.urn_ip2); c.urn_len = upnp.urn_ip2.len;
+    const host = "127.0.0.1";
+    @memcpy(c.device_host_buf[0..host.len], host); c.device_host_len = host.len; c.device_port = 54321;
+    var before: linux.timespec = undefined; var after: linux.timespec = undefined;
+    _ = linux.clock_gettime(.MONOTONIC, &before);
+    _ = c.addPortMapping("udp", 12345, "budget regression", 3600) catch {};
+    _ = linux.clock_gettime(.MONOTONIC, &after);
+    const elapsed = (after.sec - before.sec) * 1000 + @divTrunc(after.nsec - before.nsec, 1_000_000);
+    std.debug.print("caller_timeout_ms=100 mapping_elapsed_ms={d}\n", .{elapsed});
+    try std.testing.expect(elapsed <= 130);
+}
+
+test "relative control URL normalizes dot segments and preserves query" {
+    var out: [256]u8 = undefined;
+    const base = "http://127.0.0.1:54321/";
+    try std.testing.expectEqualStrings("http://127.0.0.1:54321/ip2", try upnp.resolveControlUrl(base, base, "ctl/../ip2", &out));
+    try std.testing.expectEqualStrings("http://127.0.0.1:54321/ctl/ip2", try upnp.resolveControlUrl(base, base, "./ctl/ip2", &out));
+    try std.testing.expectEqualStrings("http://127.0.0.1:54321/ip2?q=../x", try upnp.resolveControlUrl(base, base, "/ctl/../ip2?q=../x", &out));
+}
+
+test "HTTP 500 preserves permanent lease fault body" {
+    var gate_buf: [64]u8 = undefined;
+    if (regressionEnv(&gate_buf) == null) return error.SkipZigTest;
+    var req: [4096]u8 = undefined;
+    var resp: [4096]u8 = undefined;
+    const body = try upnp.httpPostSoap("http://127.0.0.1:54321/fault/725", upnp.urn_ip2, "AddPortMapping", "", &req, &resp, 1000);
+    try std.testing.expect(std.mem.indexOf(u8, body, "<s:Fault>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "<errorCode>725</errorCode>") != null);
+}
