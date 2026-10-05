@@ -50,6 +50,13 @@ pub const lock_poll_ms = 5;
 pub const min_page_size = 512;
 pub const max_page_size = 65536;
 
+/// Validate SQLite page geometry before arithmetic, allocation or file IO.
+fn validatePageSize(page_size: u32) Error!void {
+    if (page_size < min_page_size or page_size > max_page_size or (page_size & (page_size - 1)) != 0)
+        return Error.InvalidPageSize;
+}
+
+
 /// Text encodings from header offset 56.
 pub const TextEncoding = enum(u32) {
     utf8 = 1,
@@ -95,10 +102,9 @@ pub const Header = struct {
     /// Page size in bytes. Stored value 1 means 65536.
     pub fn pageSize(self: Header) Error!u32 {
         const v = self.u16be(16);
-        if (v == 1) return max_page_size;
-        if (v < min_page_size or v > max_page_size or (v & (v - 1)) != 0)
-            return Error.InvalidPageSize;
-        return v;
+        const page_size: u32 = if (v == 1) max_page_size else v;
+        try validatePageSize(page_size);
+        return page_size;
     }
 
     /// Write version at offset 18: 1 legacy rollback-journal, 2 WAL.
@@ -183,6 +189,7 @@ pub const Header = struct {
 /// File offset of page `page_no` (1-based). Page 1 starts at 0 and carries
 /// the 100-byte header; every other page starts at (n-1)*page_size.
 pub fn pageOffset(page_no: u32, page_size: u32) Error!u64 {
+    try validatePageSize(page_size);
     if (page_no == 0) return Error.PageOutOfRange;
     return @as(u64, page_no - 1) * page_size;
 }
@@ -228,7 +235,7 @@ pub const DbFile = struct {
     /// Page count from the current file size. Errors when the size is not
     /// a whole number of pages (partial tail) or the file is empty.
     pub fn pageCount(self: DbFile, page_size: u32) Error!u32 {
-        if (page_size < min_page_size or page_size > max_page_size) return Error.InvalidPageSize;
+        try validatePageSize(page_size);
         const len = try self.size();
         if (len == 0) return Error.Corrupt;
         if (len % page_size != 0) return Error.Corrupt;
@@ -248,6 +255,7 @@ pub const DbFile = struct {
     /// Read full page `page_no` (1-based) into `buf`, which must be exactly
     /// one page. Bounds-checked against the current file size.
     pub fn readPage(self: DbFile, page_no: u32, page_size: u32, buf: []u8) Error!void {
+        try validatePageSize(page_size);
         if (buf.len != page_size) return Error.Corrupt;
         const count = try self.pageCount(page_size);
         if (page_no == 0 or page_no > count) return Error.PageOutOfRange;
@@ -260,6 +268,7 @@ pub const DbFile = struct {
     /// extend the file (used by the future pager for growth); pages before
     /// the end must already exist (no sparse holes).
     pub fn writePage(self: DbFile, page_no: u32, page_size: u32, buf: []const u8) Error!void {
+        try validatePageSize(page_size);
         if (buf.len != page_size) return Error.Corrupt;
         if (page_no == 0) return Error.PageOutOfRange;
         const len = try self.size();
@@ -368,8 +377,7 @@ fn sleepMs(ms: u64) void {
 /// (b-tree roots are a follow-up card).
 pub fn createEmpty(io: std.Io, allocator: std.mem.Allocator, path: []const u8, page_size: u32, page_count: u32, encoding: TextEncoding) Error!void {
     if (page_count == 0) return Error.Corrupt;
-    if (page_size < min_page_size or page_size > max_page_size or (page_size & (page_size - 1)) != 0)
-        return Error.InvalidPageSize;
+    try validatePageSize(page_size);
     var db = try DbFile.createAbsolute(io, path, true);
     defer db.close();
 
