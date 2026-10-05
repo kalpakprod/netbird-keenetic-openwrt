@@ -128,3 +128,236 @@ test "generate header carries license by path" {
     const bsd = try gen.generate(arena.allocator(), &file, "client/proto/daemon.proto");
     try expectContains(bsd, "BSD-3-Clause");
 }
+
+// Compile and execute the actual generated codec, rather than asserting text.
+// The parent zig test is admitted by swarm-heavy.sh. Its compiler child runs
+// synchronously under that same admission and closes the inherited gate fd.
+fn runGenerated(schema: []const u8, checks: []const u8) !void {
+    if (@import("builtin").target.cpu.arch != .x86_64) return;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var p = try parser.Parser.init(a, schema);
+    const file = try p.parse();
+    const source = try gen.generate(a, &file, "shared/signal/proto/signalexchange.proto");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const wire = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/proto/wire.zig", a, .unlimited);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "wire.zig", .data = wire });
+    var codecs = try tmp.dir.createDirPathOpen(std.testing.io, "gen", .{});
+    defer codecs.close(std.testing.io);
+    try codecs.writeFile(std.testing.io, .{ .sub_path = "codec.zig", .data = source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "runtime.zig", .data = checks });
+    var path_buf: [4096]u8 = undefined;
+    const n = try tmp.dir.realPath(std.testing.io, &path_buf);
+    const result = try std.process.run(a, std.testing.io, .{
+        .argv = &.{ "sh", "-c", "exec 9>&-; exec zig test runtime.zig" },
+        .cwd = .{ .path = path_buf[0..n] },
+    });
+    std.debug.print("generated runtime:\n{s}{s}", .{ result.stdout, result.stderr });
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+}
+
+test "generated signal packed features wire length" {
+    try runGenerated(
+        "syntax = \"proto3\"; message Body { repeated uint32 features = 1; }",
+        \\const std = @import("std");
+        \\const codec = @import("gen/codec.zig");
+        \\test "features [1,2,3] exact packed bytes" {
+        \\    var values = [_]u32{1,2,3};
+        \\    const m = codec.Body{ .features = &values };
+        \\    try std.testing.expectEqual(@as(usize, 5), m.size());
+        \\    var buf: [5]u8 = undefined;
+        \\    try m.encode(&buf);
+        \\    try std.testing.expectEqualSlices(u8, &.{0x0a,3,1,2,3}, &buf);
+        \\    var decoded = try codec.Body.decode(std.testing.allocator, &buf);
+        \\    defer decoded.deinit(std.testing.allocator);
+        \\    try std.testing.expectEqualSlices(u32, &values, decoded.features);
+        \\}
+    );
+}
+
+test "generated single case oneof executes" {
+    try runGenerated(
+        "syntax = \"proto3\"; message JobResponse { oneof result { bool accepted = 1; } }",
+        \\const std = @import("std");
+        \\const codec = @import("gen/codec.zig");
+        \\test "single arm size encode decode" {
+        \\    const m = codec.JobResponse{ .result = .{ .accepted = true } };
+        \\    try std.testing.expectEqual(@as(usize, 2), m.size());
+        \\    var buf: [2]u8 = undefined;
+        \\    try m.encode(&buf);
+        \\    try std.testing.expectEqualSlices(u8, &.{8,1}, &buf);
+        \\    var decoded = try codec.JobResponse.decode(std.testing.allocator, &buf);
+        \\    defer decoded.deinit(std.testing.allocator);
+        \\    try std.testing.expect(decoded.result.?.accepted);
+        \\}
+    );
+}
+
+test "duplicate singular submessages merge" {
+    try runGenerated(
+        "syntax = \"proto3\"; message Mode { optional bool direct = 1; optional bool other = 2; } message Body { Mode mode = 5; }",
+        \\const std = @import("std");
+        \\const codec = @import("gen/codec.zig");
+        \\test "empty occurrence preserves previous fields and explicit defaults overwrite" {
+        \\    var m = try codec.Body.decode(std.testing.allocator, &.{0x2a,2,8,1,0x2a,0});
+        \\    defer m.deinit(std.testing.allocator);
+        \\    try std.testing.expectEqual(@as(?bool, true), m.mode.?.direct);
+        \\    var n = try codec.Body.decode(std.testing.allocator, &.{0x2a,2,8,1,0x2a,4,8,0,16,1});
+        \\    defer n.deinit(std.testing.allocator);
+        \\    try std.testing.expectEqual(@as(?bool, false), n.mode.?.direct);
+        \\    try std.testing.expectEqual(@as(?bool, true), n.mode.?.other);
+        \\}
+    );
+}
+
+test "duplicate strings and failed decode release ownership" {
+    try runGenerated(
+        "syntax = \"proto3\"; message Message { string key = 1; bytes body = 2; repeated string names = 3; repeated bytes blobs = 4; }",
+        \\const std = @import("std");
+        \\const codec = @import("gen/codec.zig");
+        \\test "duplicate singular strings last wins without leaks" {
+        \\    var m = try codec.Message.decode(std.testing.allocator, &.{10,1,97,10,1,98,18,1,97,18,1,98});
+        \\    defer m.deinit(std.testing.allocator);
+        \\    try std.testing.expectEqualStrings("b", m.key);
+        \\    try std.testing.expectEqualStrings("b", m.body);
+        \\}
+        \\test "truncated decode frees singular and repeated allocations" {
+        \\    try std.testing.expectError(error.Truncated, codec.Message.decode(std.testing.allocator, &.{10,1,97,26,1,98,34,1,99,18,3,1}));
+        \\}
+        \\test "allocation failures release pending elements" {
+        \\    try std.testing.checkAllAllocationFailures(std.testing.allocator, decode, .{});
+        \\}
+        \\fn decode(a: std.mem.Allocator) !void {
+        \\    var m = try codec.Message.decode(a, &.{10,1,97,10,1,98,26,1,97,26,1,98,34,1,99});
+        \\    defer m.deinit(a);
+        \\}
+    );
+}
+
+test "generated SSHAuth map last wins and deterministic order" {
+    try runGenerated(
+        "syntax = \"proto3\"; message MachineUserIndexes { uint32 index = 1; } message SSHAuth { map<string, MachineUserIndexes> machine_users = 3; }",
+        \\const std = @import("std");
+        \\const c = @import("gen/codec.zig");
+        \\test "duplicate key replaces owned message and sorts constructed entries" {
+        \\    const input = [_]u8{26,7,10,1,'b',18,2,8,1,26,7,10,1,'b',18,2,8,2};
+        \\    var m = try c.SSHAuth.decode(std.testing.allocator, &input);
+        \\    defer m.deinit(std.testing.allocator);
+        \\    try std.testing.expectEqual(@as(usize,1),m.machine_users.len);
+        \\    try std.testing.expectEqual(@as(u32,2),m.machine_users[0].value.index);
+        \\    var entries = [_]c.SSHAuth.machine_users_Entry{.{.key="b",.value=.{.index=2}},.{.key="a",.value=.{.index=1}}};
+        \\    const constructed = c.SSHAuth{.machine_users=&entries};
+        \\    var out: [18]u8 = undefined;
+        \\    try constructed.encode(&out);
+        \\    try std.testing.expectEqualSlices(u8,&.{26,7,10,1,'a',18,2,8,1,26,7,10,1,'b',18,2,8,2},&out);
+        \\    try std.testing.expectEqualStrings("b",entries[0].key);
+        \\}
+    );
+}
+
+test "headers normalize upstream origins and pinned license" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var p = try parser.Parser.init(arena.allocator(), sample);
+    const file = try p.parse();
+    const paths = [_][]const u8{
+        "upstream/netbird/management/proto/job.proto",
+        "/home/user/.cache/release/upstream-v080/signal/proto/job.proto",
+        "upstream-v080/relay/proto/job.proto",
+        "combined/proto/job.proto",
+        "upstream/netbird/shared/management/proto/management.proto",
+        "/cache/upstream-v080/shared/signal/proto/signalexchange.proto",
+    };
+    const origins = [_][]const u8{ "management/proto/job.proto", "signal/proto/job.proto", "relay/proto/job.proto", "combined/proto/job.proto", "shared/management/proto/management.proto", "shared/signal/proto/signalexchange.proto" };
+    for (paths, origins) |path, origin| {
+        const out = try gen.generate(arena.allocator(), &file, path);
+        const expected = try std.fmt.allocPrint(arena.allocator(), "Port of netbird {s} (v0.80.0), AGPL-3.0", .{origin});
+        try expectContains(out, expected);
+        try std.testing.expect(std.mem.indexOf(u8, out, "upstream") == null);
+        try std.testing.expect(std.mem.indexOf(u8, out, "/home/") == null);
+    }
+    const bsd = try gen.generate(arena.allocator(), &file, "/cache/upstream-v080/client/proto/daemon.proto");
+    try expectContains(bsd, "Port of netbird client/proto/daemon.proto (v0.80.0), BSD-3-Clause");
+    try std.testing.expect(std.mem.indexOf(u8, bsd, "/cache/") == null);
+}
+
+test "generated unknown fields preserve raw bytes" {
+    try runGenerated(
+        "syntax = \"proto3\"; message Mode { bool direct = 1; } message Empty {}",
+        \\const std = @import("std");
+        \\const c = @import("gen/codec.zig");
+        \\test "unknown and wrong wire type round trip" {
+        \\    const input = [_]u8{16,1};
+        \\    var m = try c.Mode.decode(std.testing.allocator,&input);
+        \\    defer m.deinit(std.testing.allocator);
+        \\    try std.testing.expectEqual(@as(usize,2),m.size());
+        \\    var out: [2]u8 = undefined;
+        \\    try m.encode(&out);
+        \\    try std.testing.expectEqualSlices(u8,&input,&out);
+        \\    const wrong = [_]u8{10,1,42,27,32,1,28};
+        \\    var w = try c.Mode.decode(std.testing.allocator,&wrong);
+        \\    defer w.deinit(std.testing.allocator);
+        \\    var wb: [7]u8 = undefined;
+        \\    try w.encode(&wb);
+        \\    try std.testing.expectEqualSlices(u8,&wrong,&wb);
+        \\    var empty = try c.Empty.decode(std.testing.allocator,&input);
+        \\    defer empty.deinit(std.testing.allocator);
+        \\    try std.testing.expectEqual(@as(usize,2),empty.size());
+        \\    try empty.encode(&out);
+        \\    try std.testing.expectEqualSlices(u8,&input,&out);
+        \\}
+    );
+}
+
+test "review 144 canonical unknown tag" {
+    try runGenerated("syntax = \"proto3\"; message Empty {}",
+        \\const std = @import("std");
+        \\const c = @import("gen/codec.zig");
+        \\test "minimal tag preserves nonminimal value" {
+        \\    var m = try c.Empty.decode(std.testing.allocator, &.{0x90,0,0x81,0});
+        \\    defer m.deinit(std.testing.allocator);
+        \\    try std.testing.expectEqualSlices(u8, &.{0x10,0x81,0}, m.unknown_fields);
+        \\    try std.testing.expectEqual(@as(usize,3), m.size());
+        \\}
+    );
+}
+
+test "review 144 unknown storage OOM releases decoded fields" {
+    try runGenerated("syntax = \"proto3\"; message Message { string key = 1; repeated string names = 2; }",
+        \\const std = @import("std");
+        \\const c = @import("gen/codec.zig");
+        \\test "append and owned slice failures" {
+        \\    for ([_]usize{1,2}) |index| {
+        \\        var a = std.testing.FailingAllocator.init(std.testing.allocator, .{.fail_index=index,.resize_fail_index=0});
+        \\        try std.testing.expectError(error.OutOfMemory,c.Message.decode(a.allocator(), &.{10,1,97,24,1}));
+        \\        try std.testing.expectEqual(a.allocated_bytes,a.freed_bytes);
+        \\    }
+        \\}
+    );
+}
+
+test "review 144 repeated child append owns pending child" {
+    try runGenerated("syntax = \"proto3\"; message Child {} message Parent { repeated Child children = 2; }",
+        \\const std = @import("std");
+        \\const c = @import("gen/codec.zig");
+        \\test "child append OOM" {
+        \\    var a = std.testing.FailingAllocator.init(std.testing.allocator, .{.fail_index=1});
+        \\    try std.testing.expectError(error.OutOfMemory,c.Parent.decode(a.allocator(), &.{18,2,16,1}));
+        \\    try std.testing.expectEqual(a.allocated_bytes,a.freed_bytes);
+        \\}
+    );
+}
+
+test "review 144 replaced oneof releases unknown child" {
+    try runGenerated("syntax = \"proto3\"; message Child {} message Parent { oneof result { bool accepted = 4; Child detail = 5; } }",
+        \\const std = @import("std");
+        \\const c = @import("gen/codec.zig");
+        \\test "message to scalar replacement" {
+        \\    var m = try c.Parent.decode(std.testing.allocator, &.{42,2,16,1,32,1});
+        \\    defer m.deinit(std.testing.allocator);
+        \\    try std.testing.expect(m.result.?.accepted);
+        \\}
+    );
+}
