@@ -24,6 +24,7 @@ const Stub = struct {
     drop_queries: std.atomic.Value(bool) = .init(false), // never answer
     seen: std.atomic.Value(u32) = .init(0),
     port: u16 = 0,
+    wrong_id: std.atomic.Value(bool) = .init(false),
 
     fn start(name: []const u8, ip: [4]u8) !*Stub {
         const s = try std.testing.allocator.create(Stub);
@@ -77,6 +78,7 @@ const Stub = struct {
             var reply = msg.Message{};
             reply.setReply(&query);
             reply.header.recursion_available = true;
+            if (s.wrong_id.load(.acquire)) reply.header.id +%= 1;
             const q = query.question[0];
             if (q.type == .a and std.mem.eql(u8, q.name, s.name)) {
                 const answer = arena.allocator().alloc(msg.RR, 1) catch continue;
@@ -183,4 +185,24 @@ test "unknown names become nxdomain from the stub" {
     const q = try queryOf(arena.allocator(), "other.example.", .a);
     const out = try up.handler().serve(arena.allocator(), &q, .udp);
     try std.testing.expectEqual(@as(u16, 3), out.response.header.rcode); // NXDOMAIN forwarded
+}
+
+test "wrong UDP ID is ignored and next upstream answers after timeout" {
+    const bad = try Stub.start("ok.example.", .{203, 0, 113, 9});
+    defer bad.shutdown();
+    bad.wrong_id.store(true, .release);
+    const good = try Stub.start("ok.example.", .{203, 0, 113, 10});
+    defer good.shutdown();
+    var up = upstream_mod.Upstream.init(std.testing.allocator);
+    defer up.deinit();
+    up.timeout_ms = 100;
+    try up.addServer(.{.ip4 = .{.bytes = .{127,0,0,1}, .port = bad.port}});
+    try up.addServer(.{.ip4 = .{.bytes = .{127,0,0,1}, .port = good.port}});
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const q = try queryOf(arena.allocator(), "ok.example.", .a);
+    const out = try up.handler().serve(arena.allocator(), &q, .udp);
+    try std.testing.expectEqual(q.header.id, out.response.header.id);
+    try std.testing.expectEqualSlices(u8, &.{203,0,113,10}, &out.response.answer[0].data.a);
+    try std.testing.expectEqual(@as(u32, 1), good.seen.load(.acquire));
 }

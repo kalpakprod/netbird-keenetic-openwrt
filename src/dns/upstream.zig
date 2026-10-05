@@ -33,6 +33,7 @@ pub const Error = error{
     ConnectFailed,
     Timeout,
     BadResponse,
+    IdMismatch,
 } || msg.Error;
 
 pub const Upstream = struct {
@@ -139,17 +140,29 @@ pub const Upstream = struct {
         const sock: linux.fd_t = @intCast(sock_usize);
         defer _ = linux.close(sock);
 
-        try sendToAddr(sock, addr, wire);
-
-        var pfd = [_]linux.pollfd{.{ .fd = sock, .events = linux.POLL.IN }};
-        const prc = linux.poll(&pfd, 1, @intCast(timeout_ms));
-        if (failed(prc)) return Error.RecvFailed;
-        if (prc == 0) return Error.Timeout;
-
+        // Connected UDP accepts datagrams only from the selected upstream.
+        try connectNonblock(sock, addr, timeout_ms);
+        const sent = linux.write(sock, wire.ptr, wire.len);
+        if (failed(sent) or sent != wire.len) return Error.SendFailed;
+        var start: linux.timespec = undefined;
+        _ = linux.clock_gettime(linux.CLOCK.MONOTONIC, &start);
+        const deadline = @as(i128, start.sec) * 1000 + @divTrunc(start.nsec, 1000000) + timeout_ms;
         const resp = try arena.alloc(u8, 65535);
-        const n = linux.recvfrom(sock, resp.ptr, resp.len, 0, null, null);
-        if (failed(n) or n == 0) return Error.RecvFailed;
-        return unpackReply(arena, resp[0..n]);
+        while (true) {
+            var now: linux.timespec = undefined;
+            _ = linux.clock_gettime(linux.CLOCK.MONOTONIC, &now);
+            const remaining = deadline - (@as(i128, now.sec) * 1000 + @divTrunc(now.nsec, 1000000));
+            if (remaining <= 0) return Error.Timeout;
+            var pfd = [_]linux.pollfd{.{ .fd = sock, .events = linux.POLL.IN }};
+            const prc = linux.poll(&pfd, 1, @intCast(remaining));
+            if (failed(prc)) return Error.RecvFailed;
+            if (prc == 0) return Error.Timeout;
+            const n = linux.recvfrom(sock, resp.ptr, resp.len, 0, null, null);
+            if (failed(n) or n == 0) return Error.RecvFailed;
+            const parsed = try unpackReply(arena, resp[0..n]);
+            if (parsed.header.id != std.mem.readInt(u16, wire[0..2], .big)) continue;
+            return parsed;
+        }
     }
 
     fn exchangeTcp(arena: std.mem.Allocator, addr: std.Io.net.IpAddress, wire: []const u8, timeout_ms: u32) Error!msg.Message {
@@ -179,7 +192,9 @@ pub const Upstream = struct {
         const len_hdr = try readExact(arena, sock, 2, timeout_ms);
         const resp_len = std.mem.readInt(u16, len_hdr[0..2], .big);
         const resp = try readExact(arena, sock, resp_len, timeout_ms);
-        return unpackReply(arena, resp);
+        const parsed = try unpackReply(arena, resp);
+        if (parsed.header.id != std.mem.readInt(u16, wire[0..2], .big)) return Error.IdMismatch;
+        return parsed;
     }
 
     fn readExact(arena: std.mem.Allocator, sock: linux.fd_t, want: usize, timeout_ms: u32) Error![]u8 {
