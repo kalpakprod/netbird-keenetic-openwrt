@@ -274,20 +274,18 @@ pub const SpecBuilder = struct {
 
     pub fn arg(b: *SpecBuilder, text: []const u8) Error!void {
         const owned = b.alloc.dupe(u8, text) catch return Error.OutOfMemory;
+        // Single cleanup: the errdefer frees the buffer when append
+        // fails; on success the list owns it.
         errdefer b.alloc.free(owned);
-        b.args.append(b.alloc, owned) catch {
-            b.alloc.free(owned);
-            return Error.OutOfMemory;
-        };
+        b.args.append(b.alloc, owned) catch return Error.OutOfMemory;
     }
 
     pub fn argf(b: *SpecBuilder, comptime fmt: []const u8, values: anytype) Error!void {
         const owned = std.fmt.allocPrint(b.alloc, fmt, values) catch return Error.OutOfMemory;
+        // Single cleanup: the errdefer frees the buffer when append
+        // fails; on success the list owns it.
         errdefer b.alloc.free(owned);
-        b.args.append(b.alloc, owned) catch {
-            b.alloc.free(owned);
-            return Error.OutOfMemory;
-        };
+        b.args.append(b.alloc, owned) catch return Error.OutOfMemory;
     }
 
     pub fn appendSpec(b: *SpecBuilder, spec: []const []const u8) Error!void {
