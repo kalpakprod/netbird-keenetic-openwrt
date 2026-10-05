@@ -153,6 +153,61 @@ const WgStub = struct {
     }
 };
 
+
+/// Wrap the local transport to count each owned connection independently.
+const CountingDial = struct {
+    opened: usize = 0,
+    closed: usize = 0,
+    const Owned = struct {
+        owner: *CountingDial,
+        inner: client_service.DialResult,
+        alloc: std.mem.Allocator,
+        fn close(ctx: *anyopaque) void {
+            const o: *Owned = @ptrCast(@alignCast(ctx));
+            o.inner.closeFn(o.inner.ctx);
+            o.owner.closed += 1;
+            o.alloc.destroy(o);
+        }
+    };
+    fn dial(ctx: *anyopaque, endpoint: []const u8, alloc: std.mem.Allocator, io: std.Io) client_service.DialError!client_service.DialResult {
+        const c: *CountingDial = @ptrCast(@alignCast(ctx));
+        const o = try alloc.create(Owned);
+        errdefer alloc.destroy(o);
+        o.* = .{ .owner = c, .alloc = alloc, .inner = try client_service.plain_dial.dialFn(client_service.plain_dial.ctx, endpoint, alloc, io) };
+        c.opened += 1;
+        return .{ .ctx = o, .transport = o.inner.transport, .closeFn = Owned.close };
+    }
+};
+
+test "repeated live start balances transports and WG generations" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const alloc = std.testing.allocator;
+    var mgmt_child = try spawnMgmt(alloc, 18808);
+    defer mgmt_child.kill(tio);
+    var sig_child = try spawnSignal(alloc, 18818);
+    defer sig_child.kill(tio);
+    var counts = CountingDial{};
+    const sc = try client_service.ServiceContext.create(alloc, tio, testConfig("127.0.0.1:18818"), .{ .ctx = &counts, .dialFn = CountingDial.dial });
+    defer sc.destroy();
+    var stub = WgStub{};
+    sc.adapter.wg = stub.binding();
+    const svc = backendFor(sc, "127.0.0.1:18808");
+    try svc.loginFn(svc.ctx, "test-setup-key");
+    try svc.startFn(svc.ctx);
+    try svc.loginFn(svc.ctx, "test-setup-key");
+    // StartError cannot express AlreadyStarted within this card's authority.
+    // Release the prior generation before starting the replacement.
+    try svc.startFn(svc.ctx);
+    svc.stopFn(svc.ctx);
+    std.debug.print("opened={d} closed={d} WGstarts={d} WGstops={d}\n", .{ counts.opened, counts.closed, stub.starts, stub.stops });
+    try std.testing.expectEqual(counts.opened, counts.closed);
+    try std.testing.expectEqual(@as(usize, 2), stub.starts);
+    try std.testing.expectEqual(stub.starts, stub.stops);
+    svc.stopFn(svc.ctx);
+    try std.testing.expectEqual(counts.opened, counts.closed);
+    try std.testing.expectEqual(stub.starts, stub.stops);
+}
+
 test "adapter login stores state only after management response" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     const alloc = std.testing.allocator;

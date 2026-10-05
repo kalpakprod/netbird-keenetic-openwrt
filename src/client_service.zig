@@ -342,6 +342,9 @@ fn adapterLogin(ctx: *anyopaque, setup_key: []const u8) engine.Service.AuthError
 
 fn adapterStart(ctx: *anyopaque) engine.Service.StartError!void {
     const a: *Adapter = @ptrCast(@alignCast(ctx));
+    // StartError has no AlreadyStarted case. Release the previous
+    // generation before replacement so live fields are never overwritten.
+    a.release();
     // Without a login response there is no signal endpoint and no
     // registration: the start failed (the Engine only calls start after
     // an authenticated login or up).
