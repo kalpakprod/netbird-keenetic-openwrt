@@ -132,3 +132,53 @@ fn allocationCase(allocator: std.mem.Allocator) !void {
     const values = try r.decode(allocator, bytes);
     defer allocator.free(values);
 }
+
+test "SQLite serial type 7 NaNs decode as NULL" {
+    const records = [_][]const u8{
+        "02077ff8000000000001", // quiet NaN
+        "02077ff0000000000001", // signaling NaN
+        "0207fff8123456789abc", // negative NaN with payload
+    };
+    for (records) |hex| {
+        const bytes = try unhex(hex);
+        defer a.free(bytes);
+        const values = try r.decode(a, bytes);
+        defer a.free(values);
+        try std.testing.expectEqual(@as(usize, 1), values.len);
+        try std.testing.expectEqual(std.meta.Tag(r.Value).null, std.meta.activeTag(values[0]));
+    }
+}
+
+test "SQLite NaN inputs encode as NULL" {
+    const cases = [_]u64{ 0x7ff8000000000001, 0x7ff0000000000001, 0xfff8123456789abc };
+    for (cases) |bits| {
+        const value: r.Value = .{ .real = @bitCast(bits) };
+        try std.testing.expectEqual(@as(u64, 0), try r.serialTypeFor(value));
+        const bytes = try r.encode(a, &.{value});
+        defer a.free(bytes);
+        try std.testing.expectEqualSlices(u8, &.{ 2, 0 }, bytes);
+    }
+}
+
+test "SQLite non NaN REAL values preserve exact bits" {
+    const records = [_][]const u8{
+        "02070000000000000000", // +0
+        "02078000000000000000", // -0
+        "02077ff0000000000000", // +inf
+        "0207fff0000000000000", // -inf
+        "02070000000000000001", // smallest subnormal
+        "02073ff8000000000000", // 1.5
+    };
+    for (records) |hex| {
+        const bytes = try unhex(hex);
+        defer a.free(bytes);
+        const values = try r.decode(a, bytes);
+        defer a.free(values);
+        try std.testing.expectEqual(@as(usize, 1), values.len);
+        const bits = try std.fmt.parseInt(u64, hex[4..], 16);
+        try equal(.{ .real = @bitCast(bits) }, values[0]);
+        const encoded = try r.encode(a, values);
+        defer a.free(encoded);
+        try std.testing.expectEqualSlices(u8, bytes, encoded);
+    }
+}
