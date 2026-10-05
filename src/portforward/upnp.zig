@@ -522,7 +522,9 @@ pub fn httpPostSoap(
     @memcpy(req_buf[head.len..][0..body.len], body);
     const r = try httpRoundTrip(u.host, u.port, req_buf[0 .. head.len + body.len], resp_buf, timeout_ms);
     // goupnp reads the body even on SOAP faults (HTTP 500 with a body).
-    if (r.status != 200 and r.body.len == 0) return Error.BadStatus;
+    if (std.mem.indexOf(u8, r.body, "<s:Fault>") != null or
+        std.mem.indexOf(u8, r.body, "<SOAP-ENV:Fault>") != null) return Error.SoapFault;
+    if (r.status != 200) return Error.BadStatus;
     return r.body;
 }
 
