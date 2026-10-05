@@ -128,3 +128,49 @@ test "generate header carries license by path" {
     const bsd = try gen.generate(arena.allocator(), &file, "client/proto/daemon.proto");
     try expectContains(bsd, "BSD-3-Clause");
 }
+
+// Compile and execute the actual generated codec, rather than asserting text.
+// The parent zig test is admitted by swarm-heavy.sh. Its compiler child runs
+// synchronously under that same admission and closes the inherited gate fd.
+fn runGenerated(schema: []const u8, checks: []const u8) !void {
+    if (@import("builtin").target.cpu.arch != .x86_64) return;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var p = try parser.Parser.init(a, schema);
+    const file = try p.parse();
+    const source = try gen.generate(a, &file, "shared/signal/proto/signalexchange.proto");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const wire = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/proto/wire.zig", a, .unlimited);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "wire.zig", .data = wire });
+    var codecs = try tmp.dir.createDirPathOpen(std.testing.io, "gen", .{});
+    defer codecs.close(std.testing.io);
+    try codecs.writeFile(std.testing.io, .{ .sub_path = "codec.zig", .data = source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "runtime.zig", .data = checks });
+    var path_buf: [4096]u8 = undefined;
+    const n = try tmp.dir.realPath(std.testing.io, &path_buf);
+    const result = try std.process.run(a, std.testing.io, .{
+        .argv = &.{ "sh", "-c", "exec 9>&-; exec zig test runtime.zig" },
+        .cwd = .{ .path = path_buf[0..n] },
+    });
+    std.debug.print("generated runtime:\n{s}{s}", .{ result.stdout, result.stderr });
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+}
+
+test "duplicate singular submessages merge" {
+    try runGenerated(
+        "syntax = \"proto3\"; message Mode { optional bool direct = 1; optional bool other = 2; } message Body { Mode mode = 5; }",
+        \\const std = @import("std");
+        \\const codec = @import("gen/codec.zig");
+        \\test "empty occurrence preserves previous fields and explicit defaults overwrite" {
+        \\    var m = try codec.Body.decode(std.testing.allocator, &.{0x2a,2,8,1,0x2a,0});
+        \\    defer m.deinit(std.testing.allocator);
+        \\    try std.testing.expectEqual(@as(?bool, true), m.mode.?.direct);
+        \\    var n = try codec.Body.decode(std.testing.allocator, &.{0x2a,2,8,1,0x2a,4,8,0,16,1});
+        \\    defer n.deinit(std.testing.allocator);
+        \\    try std.testing.expectEqual(@as(?bool, false), n.mode.?.direct);
+        \\    try std.testing.expectEqual(@as(?bool, true), n.mode.?.other);
+        \\}
+    );
+}

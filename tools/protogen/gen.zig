@@ -1057,7 +1057,7 @@ fn emitDecode(g: *Generator, indent: []const u8, order: []const OrderItem) Error
     try g.line("", .{});
     try g.line("{s}pub fn decodeWithDepth(a: std.mem.Allocator, buf: []const u8, depth: u32) DecodeError!@This() {{", .{indent});
     try g.line("{s}    if (depth == 0) return error.RecursionDepth;", .{indent});
-    if (!uses_alloc) try g.line("{s}    _ = a;", .{indent});
+    if (!uses_alloc and order.len == 0) try g.line("{s}    _ = a;", .{indent});
     if (order.len == 0) {
         try g.line("{s}    _ = buf;", .{indent});
         try g.line("{s}    return @This(){{}};", .{indent});
@@ -1065,6 +1065,12 @@ fn emitDecode(g: *Generator, indent: []const u8, order: []const OrderItem) Error
         return;
     }
     try g.line("{s}    var m = @This(){{}};", .{indent});
+    try g.line("{s}    try m.mergeWithDepth(a, buf, depth);", .{indent});
+    try g.line("{s}    return m;", .{indent});
+    try g.line("{s}}}", .{indent});
+    try g.line("{s}pub fn mergeWithDepth(m: *@This(), a: std.mem.Allocator, buf: []const u8, depth: u32) DecodeError!void {{", .{indent});
+    try g.line("{s}    if (depth == 0) return error.RecursionDepth;", .{indent});
+    if (!uses_alloc) try g.line("{s}    _ = a;", .{indent});
     try g.line("{s}    var d = wire.Decoder.init(buf);", .{indent});
     // Local accumulation lists for repeated/map fields.
     for (order) |item| {
@@ -1082,6 +1088,13 @@ fn emitDecode(g: *Generator, indent: []const u8, order: []const OrderItem) Error
             },
             .map => {
                 try g.line("{s}    var list_{s}: std.ArrayList({s}_Entry) = .empty;", .{ indent, d.raw, d.raw });
+            },
+            else => {},
+        }
+        switch (d.kind) {
+            .repeated_scalar, .repeated_string, .repeated_message, .map => {
+                try g.line("{s}    list_{s} = .{{ .items = m.{s}, .capacity = m.{s}.len }};", .{ indent, d.raw, d.zig, d.zig });
+                try g.line("{s}    m.{s} = &.{{}};", .{ indent, d.zig });
             },
             else => {},
         }
@@ -1110,7 +1123,6 @@ fn emitDecode(g: *Generator, indent: []const u8, order: []const OrderItem) Error
             else => {},
         }
     }
-    try g.line("{s}    return m;", .{indent});
     try g.line("{s}}}", .{indent});
 }
 
@@ -1155,7 +1167,11 @@ fn emitFieldDecodeArm(g: *Generator, indent: []const u8, d: *const FieldDesc) Er
             try g.line("{s}{d} => if (tag.typ == .bytes) {{", .{ arm_indent, d.number });
             try g.line("{s}    const b = try d.consumeBytes();", .{arm_indent});
             try g.line("{s}    if (depth == 0) return error.RecursionDepth;", .{arm_indent});
-            try g.line("{s}    m.{s} = try {s}.decodeWithDepth(a, b, depth - 1);", .{ arm_indent, d.zig, d.type_zig });
+            try g.line("{s}    if (m.{s}) |*child| {{", .{ arm_indent, d.zig });
+            try g.line("{s}        try child.mergeWithDepth(a, b, depth - 1);", .{arm_indent});
+            try g.line("{s}    }} else {{", .{arm_indent});
+            try g.line("{s}        m.{s} = try {s}.decodeWithDepth(a, b, depth - 1);", .{ arm_indent, d.zig, d.type_zig });
+            try g.line("{s}    }}", .{arm_indent});
             try g.line("{s}}} else {{", .{arm_indent});
             try g.line("{s}    {s}", .{ arm_indent, skip });
             try g.line("{s}}},", .{arm_indent});
