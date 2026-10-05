@@ -239,6 +239,7 @@ pub const Conn = struct {
     pub fn destroy(c: *Conn) void {
         const gpa = c.gpa;
         if (c.net) |n| {
+            n.stream.close(c.io);
             if (n.tls_client) |t| gpa.destroy(t);
             for (n.heap) |buf| if (buf.len > 0) gpa.free(buf);
             gpa.destroy(n);
