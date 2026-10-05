@@ -211,3 +211,43 @@ test "original modes survive recreation on apply and restore" {
         try testing.expectEqual(mode, std.mem.readInt(u32, stat[if (builtin.cpu.arch == .aarch64) 16 else 24 ..][0..4], .little) & 0o777);
     }
 }
+
+test "shutdown state conditional recovery and clean removal" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]bool{ false, true }) |changed| {
+        const tp = tempPaths();
+        const state = try std.fmt.allocPrintSentinel(a, "{s}/dns_state", .{tp.dir}, 0);
+        const recovery = try std.fmt.allocPrintSentinel(a, "{s}/recovery", .{tp.dir}, 0);
+        defer _ = linux.rmdir(tp.dir.ptr);
+        defer _ = linux.unlink(tp.config.ptr);
+        defer _ = linux.unlink(tp.backup.ptr);
+        defer _ = linux.unlink(state.ptr);
+        defer _ = linux.unlink(recovery.ptr);
+        const original = "nameserver 8.8.8.8\n";
+        try testWrite(tp.config.ptr, original);
+        var fc = file.FileConfigurator{ .alloc = a, .config_path = tp.config, .backup_path = tp.backup, .state_path = state, .recovery_path = recovery };
+        try fc.backup();
+        try fc.apply(&.{}, "100.100.111.1");
+        try testing.expect(file.fileExists(state.ptr));
+        const external = "nameserver 9.9.9.9\n";
+        if (changed) try testWrite(tp.config.ptr, external);
+        // Survives a process/configurator restart and loss of the ordinary backup.
+        _ = linux.unlink(tp.backup.ptr);
+        var restarted = file.FileConfigurator{ .alloc = a, .config_path = tp.config, .backup_path = tp.backup, .state_path = state, .recovery_path = recovery };
+        try restarted.restoreUncleanShutdownDNS();
+        try testing.expectEqualStrings(if (changed) external else original, try file.readFileAlloc(a, tp.config.ptr));
+        try fc.backup();
+        try fc.apply(&.{}, "100.100.111.1");
+        try fc.restoreHostDNS();
+        try testing.expect(!file.fileExists(state.ptr));
+    }
+}
+
+fn testWrite(path: [*:0]const u8, contents: []const u8) !void {
+    const fd = linux.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o600);
+    try testing.expect(!failed(fd));
+    defer _ = linux.close(@intCast(fd));
+    try testing.expectEqual(contents.len, linux.write(@intCast(fd), contents.ptr, contents.len));
+}
