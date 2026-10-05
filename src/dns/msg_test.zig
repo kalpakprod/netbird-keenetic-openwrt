@@ -519,3 +519,56 @@ test "extended rcode survives separate unpack repack" {
         try std.testing.expectEqual(rcode, reparsed.header.rcode);
     }
 }
+
+
+test "terminal dot IsFqdn matches pinned Go oracle" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Pinned miekg/dns IsFqdn uses a rune's byte START, not its final byte.
+    const cases = [_]struct { name: []const u8, accepted: bool }{
+        .{ .name = "host\\.", .accepted = false },
+        .{ .name = ".", .accepted = true },
+        .{ .name = "host\\\\.", .accepted = true },
+        .{ .name = "host.", .accepted = true },
+        .{ .name = "x.utf8é\\.", .accepted = true },
+        .{ .name = "x.utf8é\\\\.", .accepted = false },
+        .{ .name = "x.utf8€\\.", .accepted = false },
+        .{ .name = "x.utf8€\\\\.", .accepted = true },
+        .{ .name = "x.utf8😀\\.", .accepted = true },
+        .{ .name = "x.utf8😀\\\\.", .accepted = false },
+        .{ .name = "x.utf8\xff\\.", .accepted = false },
+        .{ .name = "x.utf8\xff\\\\.", .accepted = true },
+        .{ .name = "\\.", .accepted = false },
+        .{ .name = "\\\\.", .accepted = true },
+    };
+    var buf: [128]u8 = undefined;
+    var m = msg.Message{};
+    var qs = [_]msg.Question{.{ .name = ".", .type = .a, .class = msg.class_inet }};
+    m.question = &qs;
+    for (cases) |case| {
+        qs[0].name = case.name;
+        if (case.accepted) {
+            _ = try msg.pack(a, &m, &buf);
+        } else {
+            try std.testing.expectError(msg.Error.NotFqdn, msg.pack(a, &m, &buf));
+        }
+    }
+}
+
+test "accepted raw multibyte escaped dot has pinned Go wire bytes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var buf: [128]u8 = undefined;
+    var m = msg.Message{};
+    var qs = [_]msg.Question{.{ .name = "x.utf8é\\.", .type = .a, .class = msg.class_inet }};
+    m.question = &qs;
+    // Go's packer omits the unterminated final label on this accepted input.
+    const expected = [_]u8{ 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 'x', 0, 0, 1, 0, 1 };
+    for ([_][]const u8{ "x.utf8é\\.", "x.utf8😀\\." }) |name| {
+        qs[0].name = name;
+        const wire = try msg.pack(a, &m, &buf);
+        try std.testing.expectEqualSlices(u8, &expected, wire);
+    }
+}
