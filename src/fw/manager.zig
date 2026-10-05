@@ -20,6 +20,9 @@ pub const Manager = struct {
     /// WireGuard interface name, owned.
     iface: []u8,
     mtu: u16,
+    /// True when the runner points at ip6tables (affects icmp mapping).
+    /// One Manager covers one family; the engine owns two (v4 + v6).
+    v6: bool,
     /// Filter rules by owned rule id (filter.zig).
     filters: std.StringHashMapUnmanaged(model.FilterRule) = .empty,
     /// NAT and legacy route rules by owned GenKey (nat.zig).
@@ -32,6 +35,7 @@ pub const Manager = struct {
         iptables_path: []const u8,
         iface: []const u8,
         mtu: u16,
+        v6: bool,
     ) Error!Manager {
         const owned_iface = alloc.dupe(u8, iface) catch return Error.OutOfMemory;
         errdefer alloc.free(owned_iface);
@@ -41,6 +45,7 @@ pub const Manager = struct {
             .runner = .{ .path = iptables_path, .alloc = alloc, .io = io },
             .iface = owned_iface,
             .mtu = mtu,
+            .v6 = v6,
         };
     }
 
@@ -73,16 +78,21 @@ pub const Manager = struct {
     }
 
     /// Install all static state: route chains, established rules, jumps,
-    /// data-plane marks, ACL chain and its INPUT/FORWARD/mangle seeds.
-    /// Best-effort tears down previous static state first, so calling
-    /// setup twice converges to the same kernel state. Tracked dynamic
-    /// rules are dropped with the teardown (same as a process restart);
-    /// callers re-add them afterwards.
+    /// data-plane marks, ACL chain and its INPUT/FORWARD/mangle seeds,
+    /// plus the static routing state (MSS clamp, MASQUERADE rules).
+    /// Best-effort tears down previous state first, so calling setup
+    /// twice converges to the same kernel state. Tracked dynamic rules
+    /// are dropped with the teardown (same as a process restart, and
+    /// airtight even when the teardown itself hit errors); callers
+    /// re-add them afterwards.
     pub fn setup(m: *Manager) Error!void {
         m.reset() catch {};
+        m.forgetFilters();
+        m.forgetTracked();
         try m.createContainers();
         try m.setupDataplaneMarks();
         try m.createDefaultChains();
+        try m.setupStaticRouting();
     }
 
     /// Remove every rule and chain owned by this manager (static and
@@ -127,38 +137,67 @@ pub const Manager = struct {
     }
 
     /// Delete one tracked filter rule by id. No-op when unknown.
-    /// Used by filter.zig and by reset().
+    /// Used by filter.zig and by reset(). Kernel rules go first: on a
+    /// kernel failure the entry stays tracked so the caller can retry
+    /// (upstream DeleteFilterRule keeps it tracked for the same reason).
     pub fn deleteFilterByID(m: *Manager, id: []const u8) Error!void {
-        const kv = m.filters.fetchRemove(id) orelse return;
-        defer m.alloc.free(kv.key);
-        var rule = kv.value;
-        defer rule.free(m.alloc);
+        const found = m.filters.getPtr(id) orelse return;
         var ab: [40][]const u8 = undefined;
-        try m.runner.deleteIfExists(chains.table_filter, rule.chain, model.constArgs(rule.specs, &ab));
-        if (rule.mangle_specs) |ms| {
+        try m.runner.deleteIfExists(chains.table_filter, found.chain, model.constArgs(found.specs, &ab));
+        if (found.mangle_specs) |ms| {
             try m.runner.deleteIfExists(chains.table_mangle, chains.rt_pre, model.constArgs(ms, &ab));
         }
-        for (rule.extra) |e| {
-            try m.runner.deleteIfExists(chains.table_filter, rule.chain, model.constArgs(e.specs, &ab));
+        for (found.extra) |e| {
+            try m.runner.deleteIfExists(chains.table_filter, found.chain, model.constArgs(e.specs, &ab));
             if (e.mangle_specs) |ms| {
                 try m.runner.deleteIfExists(chains.table_mangle, chains.rt_pre, model.constArgs(ms, &ab));
             }
         }
+        var kv = m.filters.fetchRemove(id).?;
+        m.alloc.free(kv.key);
+        kv.value.free(m.alloc);
     }
 
     /// Delete one tracked NAT/legacy rule by key. No-op when unknown.
-    /// Used by nat.zig and by reset().
+    /// Used by nat.zig and by reset(). Kernel-first, like deleteFilterByID.
     pub fn deleteTrackedByKey(m: *Manager, key: []const u8) Error!void {
-        const kv = m.tracked.fetchRemove(key) orelse return;
-        defer m.alloc.free(kv.key);
-        var rule = kv.value;
-        defer rule.free(m.alloc);
+        const found = m.tracked.getPtr(key) orelse return;
         var ab: [40][]const u8 = undefined;
-        try m.runner.deleteIfExists(rule.table, rule.chain, model.constArgs(rule.spec, &ab));
+        try m.runner.deleteIfExists(found.table, found.chain, model.constArgs(found.spec, &ab));
+        var kv = m.tracked.fetchRemove(key).?;
+        m.alloc.free(kv.key);
+        kv.value.free(m.alloc);
+    }
+
+    /// setupStaticRouting: MSS clamp chain + FORWARD jump + clamp rule
+    /// (addMSSClampingRules) and the two static MASQUERADE rules in
+    /// NETBIRD-RT-NAT (addPostroutingRules). Runs after the seeds, but
+    /// the final state matches upstream order: the MSS jump lands at
+    /// FORWARD position 1 however the guards got there first.
+    fn setupStaticRouting(m: *Manager) Error!void {
+        if (try m.runner.chainExists(chains.table_mangle, chains.rt_mss_clamp)) {
+            m.runner.flushChain(chains.table_mangle, chains.rt_mss_clamp) catch {};
+            m.runner.deleteChain(chains.table_mangle, chains.rt_mss_clamp) catch {};
+        }
+        try m.runner.newChain(chains.table_mangle, chains.rt_mss_clamp);
+
+        var jb: [2][]const u8 = undefined;
+        try m.runner.insert(chains.table_mangle, chains.forward, 1, chains.jump(&jb, chains.rt_mss_clamp));
+
+        var cb: [11][]const u8 = undefined;
+        var val: [8]u8 = undefined;
+        try m.runner.append(
+            chains.table_mangle,
+            chains.rt_mss_clamp,
+            chains.mssClamp(&cb, &val, m.iface, m.mtu, m.v6),
+        );
+
+        var nb: [9][]const u8 = undefined;
+        try m.runner.append(chains.table_nat, chains.rt_nat, chains.natMasqueradeOut(&nb));
+        try m.runner.append(chains.table_nat, chains.rt_nat, chains.natMasqueradeReturn(&nb, m.iface));
     }
 
     /// createContainers: route chains + established rules + jumps.
-    /// (Static NAT and MSS rules are added by nat.setupRouting, step 3.)
     fn createContainers(m: *Manager) Error!void {
         const defs = [_][2][]const u8{
             .{ chains.table_filter, chains.rt_fwd_in },
@@ -263,6 +302,7 @@ pub const Manager = struct {
         m.runner.deleteIfExists(chains.table_nat, chains.postrouting, chains.jump(&jb, chains.rt_nat)) catch |e| note(&first_err, e);
         m.runner.deleteIfExists(chains.table_mangle, chains.prerouting, chains.jump(&jb, chains.rt_pre)) catch |e| note(&first_err, e);
         m.runner.deleteIfExists(chains.table_nat, chains.prerouting, chains.jump(&jb, chains.rt_rdr)) catch |e| note(&first_err, e);
+        m.runner.deleteIfExists(chains.table_mangle, chains.forward, chains.jump(&jb, chains.rt_mss_clamp)) catch |e| note(&first_err, e);
 
         var mb: [10][]const u8 = undefined;
         m.runner.deleteIfExists(chains.table_mangle, chains.prerouting, chains.dataplaneMarkIn(&mb, m.iface)) catch |e| note(&first_err, e);
@@ -274,6 +314,7 @@ pub const Manager = struct {
             .{ chains.table_mangle, chains.rt_pre },
             .{ chains.table_nat, chains.rt_nat },
             .{ chains.table_nat, chains.rt_rdr },
+            .{ chains.table_mangle, chains.rt_mss_clamp },
         };
         for (defs) |d| {
             m.runner.clearAndDeleteChain(d[0], d[1]) catch |e| note(&first_err, e);
