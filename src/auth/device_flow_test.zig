@@ -170,6 +170,34 @@ test "login hint appended to verification uris" {
     try std.testing.expect(std.mem.indexOf(u8, info.verification_uri, "login_hint=") != null);
 }
 
+test "login hint mutates query replacing existing key and keeping fragment" {
+    const enc = "user%40example.com";
+    // Appends to an existing query.
+    const got1 = try df.appendLoginHint(alloc, "https://idp/a?x=1", "user@example.com");
+    defer alloc.free(got1);
+    try std.testing.expectEqualStrings("https://idp/a?x=1&login_hint=" ++ enc, got1);
+    // Fragment stays out of the query.
+    const got2 = try df.appendLoginHint(alloc, "https://idp/a?x=1#frag", "user@example.com");
+    defer alloc.free(got2);
+    try std.testing.expectEqualStrings("https://idp/a?x=1&login_hint=" ++ enc ++ "#frag", got2);
+    // Fragment-only URI gets a query before the fragment.
+    const got3 = try df.appendLoginHint(alloc, "https://idp/a#frag", "user@example.com");
+    defer alloc.free(got3);
+    try std.testing.expectEqualStrings("https://idp/a?login_hint=" ++ enc ++ "#frag", got3);
+    // Prior login_hint is replaced, duplicates collapse (Go Query().Set).
+    const got4 = try df.appendLoginHint(alloc, "https://idp/a?login_hint=old&x=1&login_hint=old2", "user@example.com");
+    defer alloc.free(got4);
+    try std.testing.expectEqualStrings("https://idp/a?login_hint=" ++ enc ++ "&x=1", got4);
+    // Hint value is percent-encoded.
+    const got5 = try df.appendLoginHint(alloc, "https://idp/a", "john doe+1");
+    defer alloc.free(got5);
+    try std.testing.expectEqualStrings("https://idp/a?login_hint=john+doe%2B1", got5);
+    // Empty hint leaves the URI unchanged.
+    const got6 = try df.appendLoginHint(alloc, "https://idp/a?x=1#frag", "");
+    defer alloc.free(got6);
+    try std.testing.expectEqualStrings("https://idp/a?x=1#frag", got6);
+}
+
 // ---------------------------------------------------------------------------
 // Token polling: success, pending, slow_down, fatal, expiry, cancellation.
 // ---------------------------------------------------------------------------
@@ -375,18 +403,48 @@ test "token poll cancellation preempts wait" {
 test "audience accepts string and array forms" {
     const good_str = try craftJwt(alloc, "{\"aud\":\"test-aud\"}");
     defer alloc.free(good_str);
-    try df.validateTokenAudience(good_str, "test-aud");
+    try df.validateTokenAudience(alloc, good_str, "test-aud");
     const good_arr = try craftJwt(alloc, "{\"aud\":[\"other\",\"test-aud\"]}");
     defer alloc.free(good_arr);
-    try df.validateTokenAudience(good_arr, "test-aud");
+    try df.validateTokenAudience(alloc, good_arr, "test-aud");
     const bad = try craftJwt(alloc, "{\"aud\":\"other\"}");
     defer alloc.free(bad);
-    try std.testing.expectError(df.Error.InvalidToken, df.validateTokenAudience(bad, "test-aud"));
+    try std.testing.expectError(df.Error.InvalidToken, df.validateTokenAudience(alloc, bad, "test-aud"));
     const no_aud = try craftJwt(alloc, "{\"sub\":\"123\"}");
     defer alloc.free(no_aud);
-    try std.testing.expectError(df.Error.InvalidToken, df.validateTokenAudience(no_aud, "test-aud"));
-    try std.testing.expectError(df.Error.InvalidToken, df.validateTokenAudience("", "test-aud"));
-    try std.testing.expectError(df.Error.InvalidToken, df.validateTokenAudience("flat", "test-aud"));
+    try std.testing.expectError(df.Error.InvalidToken, df.validateTokenAudience(alloc, no_aud, "test-aud"));
+    try std.testing.expectError(df.Error.InvalidToken, df.validateTokenAudience(alloc, "", "test-aud"));
+    try std.testing.expectError(df.Error.InvalidToken, df.validateTokenAudience(alloc, "flat", "test-aud"));
+}
+
+test "audience accepts normal jwt claims around aud" {
+    // Normal payload: numeric exp/iat/nbf, nested objects/arrays, bool,
+    // null and unknown claims next to aud (review of PR #117).
+    const rich = try craftJwt(alloc, "{\"iss\":\"https://idp\",\"sub\":\"u1\",\"aud\":\"test-aud\",\"exp\":1759680000,\"iat\":1759676400,\"nbf\":1759676400,\"custom\":{\"k\":[1,2,{\"deep\":true}]},\"flag\":true,\"empty\":null}");
+    defer alloc.free(rich);
+    try df.validateTokenAudience(alloc, rich, "test-aud");
+    try std.testing.expectError(df.Error.InvalidToken, df.validateTokenAudience(alloc, rich, "other"));
+
+    const arr_numeric = try craftJwt(alloc, "{\"aud\":[\"x\",\"test-aud\"],\"exp\":1759680000,\"iat\":1759676400}");
+    defer alloc.free(arr_numeric);
+    try df.validateTokenAudience(alloc, arr_numeric, "test-aud");
+
+    // Non-string aud, malformed JSON and non-object payload still rejected.
+    const aud_num = try craftJwt(alloc, "{\"aud\":123,\"exp\":1759680000}");
+    defer alloc.free(aud_num);
+    try std.testing.expectError(df.Error.InvalidToken, df.validateTokenAudience(alloc, aud_num, "test-aud"));
+    const aud_obj = try craftJwt(alloc, "{\"aud\":{\"a\":\"test-aud\"}}");
+    defer alloc.free(aud_obj);
+    try std.testing.expectError(df.Error.InvalidToken, df.validateTokenAudience(alloc, aud_obj, "test-aud"));
+    const aud_null = try craftJwt(alloc, "{\"aud\":null}");
+    defer alloc.free(aud_null);
+    try std.testing.expectError(df.Error.InvalidToken, df.validateTokenAudience(alloc, aud_null, "test-aud"));
+    const broken = try craftJwt(alloc, "{\"aud\":\"test-aud\"");
+    defer alloc.free(broken);
+    try std.testing.expectError(df.Error.InvalidToken, df.validateTokenAudience(alloc, broken, "test-aud"));
+    const not_object = try craftJwt(alloc, "[1,2,3]");
+    defer alloc.free(not_object);
+    try std.testing.expectError(df.Error.InvalidToken, df.validateTokenAudience(alloc, not_object, "test-aud"));
 }
 
 test "email parsed from id token with name fallback" {
@@ -424,7 +482,7 @@ test "pending flow set get expiry cancel clear" {
         .expires_in = 300,
         .interval = 5,
     };
-    p.set(&clk, info); // ownership moves into p
+    p.set(alloc, &clk, info); // ownership moves into p
     try std.testing.expect(p.isPending());
     try std.testing.expectEqual(@as(i64, 5300), p.expiresAt());
 
@@ -443,6 +501,57 @@ test "pending flow set get expiry cancel clear" {
     try std.testing.expect((try p.get(alloc)) == null);
     // Cancel on empty flow is safe.
     p.cancelWait();
+}
+
+test "pending flow repeated set replaces owned info" {
+    var mc = ManualClock{ .now = 1000 };
+    const clk = mc.clock();
+    var p = df.PendingFlow{};
+
+    const first = df.AuthFlowInfo{
+        .device_code = try alloc.dupe(u8, "dc-1"),
+        .user_code = try alloc.dupe(u8, "uc-1"),
+        .verification_uri = try alloc.dupe(u8, "https://idp/one"),
+        .verification_uri_complete = try alloc.dupe(u8, "https://idp/one?c=1"),
+        .expires_in = 100,
+        .interval = 5,
+    };
+    p.set(alloc, &clk, first);
+    const second = df.AuthFlowInfo{
+        .device_code = try alloc.dupe(u8, "dc-2"),
+        .user_code = try alloc.dupe(u8, "uc-2"),
+        .verification_uri = try alloc.dupe(u8, "https://idp/two"),
+        .verification_uri_complete = try alloc.dupe(u8, "https://idp/two?c=2"),
+        .expires_in = 200,
+        .interval = 7,
+    };
+    p.set(alloc, &clk, second); // must release the first flow, not leak it
+    var got = (try p.get(alloc)).?;
+    defer got.deinit(alloc);
+    try std.testing.expectEqualStrings("dc-2", got.device_code);
+    try std.testing.expectEqualStrings("uc-2", got.user_code);
+    try std.testing.expectEqual(@as(i64, 1200), p.expiresAt());
+    p.clear(alloc);
+    try std.testing.expect((try p.get(alloc)) == null);
+}
+
+test "pending flow get oom leaves no partial copy" {
+    var mc = ManualClock{ .now = 1000 };
+    const clk = mc.clock();
+    var p = df.PendingFlow{};
+    const info = df.AuthFlowInfo{
+        .device_code = try alloc.dupe(u8, "dc-oom"),
+        .user_code = try alloc.dupe(u8, "uc-oom"),
+        .verification_uri = try alloc.dupe(u8, "https://idp/oom"),
+        .verification_uri_complete = try alloc.dupe(u8, "https://idp/oom?c=1"),
+        .expires_in = 60,
+        .interval = 5,
+    };
+    p.set(alloc, &clk, info);
+    defer p.clear(alloc);
+    // Third string allocation fails; the two staged strings must be freed.
+    var failing = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 2 });
+    try std.testing.expectError(df.Error.OutOfMemory, p.get(failing.allocator()));
 }
 
 // ---------------------------------------------------------------------------
