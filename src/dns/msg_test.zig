@@ -501,3 +501,16 @@ test "escaped presentation name uses decoded label length" {
     const parsed = try msg.unpack(a, wire);
     try std.testing.expectEqualStrings(&name, parsed.question[0].name);
 }
+
+test "extended rcode survives separate unpack repack" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator); defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]u16{ 16, 40, 4095 }) |rcode| {
+        var m = msg.Message{ .header = .{ .response = true, .rcode = rcode } };
+        const rr = try a.alloc(msg.RR, 1); rr[0] = msg.makeOpt(1232, false); m.extra = rr;
+        var b1: [128]u8 = undefined; var b2: [128]u8 = undefined;
+        const w1 = try msg.pack(a, &m, &b1); const parsed = try msg.unpack(a, w1);
+        const w2 = try msg.pack(a, &parsed, &b2); const reparsed = try msg.unpack(a, w2);
+        try std.testing.expectEqual(rcode, reparsed.header.rcode);
+    }
+}

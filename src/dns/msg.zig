@@ -186,6 +186,7 @@ pub fn unpack(alloc: std.mem.Allocator, msg: []const u8) Error!Message {
     m.answer = try unpackRRslice(alloc, msg, &off, an);
     m.ns = try unpackRRslice(alloc, msg, &off, ns);
     m.extra = try unpackRRslice(alloc, msg, &off, ar);
+    if (m.isEdns0()) |opt| m.header.rcode |= @as(u16, @intCast(opt.ttl >> 24)) << 4;
     return m;
 }
 
