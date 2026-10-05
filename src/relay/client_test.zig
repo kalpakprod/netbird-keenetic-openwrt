@@ -126,7 +126,6 @@ test "client: auth handshake sends auth msg and consumes authresponse" {
     const token = try auth.generateToken("secret", 3600, 1_700_000_000, &token_buf);
 
     const c = try FakeClient.connect(gpa, &fake, .{ .peer_id = "peer-one", .token = token });
-    try c.subscribe(msgs.hashID("b"));
     defer c.destroy();
 
     // The client must have written exactly the auth message.
@@ -169,7 +168,6 @@ test "client: subscribe, wait online, transport both ways, healthcheck" {
     const token = try auth.generateToken("secret", 3600, 1_700_000_000, &token_buf);
 
     const c = try FakeClient.connect(gpa, &fake, .{ .peer_id = "peer-one", .token = token });
-    try c.subscribe(msgs.hashID("b"));
     defer c.destroy();
     fake.written.clearRetainingCapacity(); // drop the auth msg
 
@@ -215,8 +213,8 @@ test "client: deadlines stop blocked auth wait and recv" {
     var frame: [9000]u8 = undefined;
     fake.initInPlace(testing.allocator, authResponseFrame(&frame, "rel://localhost:1"));
     const c = try FakeClient.connect(testing.allocator, &fake, .{ .peer_id = "a", .token = "" });
-    try c.subscribe(msgs.hashID("b"));
     defer c.destroy();
+    try c.subscribe(msgs.hashID("b"));
     try testing.expectError(error.Timeout, c.waitPeerOnlineDeadline(msgs.hashID("b"), 123));
     var out: [32]u8 = undefined;
     try testing.expectError(error.Timeout, c.recvDeadline(&out, 123));
@@ -229,7 +227,6 @@ test "client: unsubscribe close and wait errors release state" {
     fake.initInPlace(testing.allocator, authResponseFrame(&frame, "rel://localhost:1"));
     defer fake.deinit();
     const c = try FakeClient.connect(testing.allocator, &fake, .{ .peer_id = "a", .token = "" });
-    try c.subscribe(msgs.hashID("b"));
     defer c.destroy();
     const peer = msgs.hashID("b");
     try c.subscribe(peer);
@@ -247,9 +244,7 @@ test "client: explicit close sends relay close and is idempotent" {
     fake.initInPlace(testing.allocator, authResponseFrame(&frame, "rel://localhost:1"));
     defer fake.deinit();
     const c = try FakeClient.connect(testing.allocator, &fake, .{ .peer_id = "a", .token = "" });
-    try c.subscribe(msgs.hashID("b"));
     defer c.destroy();
-    try c.subscribe(msgs.hashID("b"));
     fake.written.clearRetainingCapacity();
     c.close();
     c.close();
