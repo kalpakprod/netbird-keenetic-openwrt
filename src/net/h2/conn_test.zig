@@ -483,3 +483,18 @@ test "peer max concurrent streams enforced" {
     c.transport = wp2.transport();
     _ = try c.writeHeaders(&[_]hpack.HeaderField{.{ .name = ":method", .value = "GET" }}, true);
 }
+
+test "local reset releases slots and discards in-flight DATA" {
+    const alloc = std.testing.allocator;
+    const late = try frameBytes(alloc, .data, 0, 1, "late");
+    defer alloc.free(late);
+    var pipe = Pipe{ .inbound = late };
+    var c = conn.Conn.init(pipe.transport());
+    for (0..20) |_| {
+        const sid = try c.writeHeaders(&.{.{ .name = ":method", .value = "POST" }}, false);
+        try c.resetStream(sid, .cancel);
+    }
+    try std.testing.expect(try c.readNext() == null);
+    try std.testing.expectEqual(@as(i64, frame.initial_window_size), c.conn_recv_window);
+    _ = try c.writeHeaders(&.{.{ .name = ":method", .value = "POST" }}, false);
+}
