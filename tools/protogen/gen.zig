@@ -1257,6 +1257,11 @@ fn emitFieldDecodeArm(g: *Generator, indent: []const u8, d: *const FieldDesc) Er
             try g.line("{s}{d} => if (tag.typ == .bytes) {{", .{ arm_indent, d.number });
             try g.line("{s}    const eb = try d.consumeBytes();", .{arm_indent});
             try g.line("{s}    var en = {s}_Entry{{}};", .{ arm_indent, d.raw });
+            try g.line("{s}    var en_owned = true;", .{arm_indent});
+            try g.line("{s}    errdefer if (en_owned) {{", .{arm_indent});
+            if (d.map_key == .string or d.map_key == .bytes) try g.line("{s}        if (en.key.len != 0) a.free(en.key);", .{arm_indent});
+            if (d.map_value_is_message) try g.line("{s}        en.value.deinit(a);", .{arm_indent}) else if (d.scalar == .string or d.scalar == .bytes) try g.line("{s}        if (en.value.len != 0) a.free(en.value);", .{arm_indent});
+            try g.line("{s}    }};", .{arm_indent});
             try g.line("{s}    var ed = wire.Decoder.init(eb);", .{arm_indent});
             try g.line("{s}    while (!ed.done()) {{", .{arm_indent});
             try g.line("{s}        const etag = try ed.consumeTag();", .{arm_indent});
@@ -1284,6 +1289,7 @@ fn emitFieldDecodeArm(g: *Generator, indent: []const u8, d: *const FieldDesc) Er
             try g.line("{s}        }}", .{arm_indent});
             try g.line("{s}    }}", .{arm_indent});
             try g.line("{s}    if (!replaced) try list_{s}.append(a, en);", .{ arm_indent, d.raw });
+            try g.line("{s}    en_owned = false;", .{arm_indent});
             try g.line("{s}}} else {{", .{arm_indent});
             try g.line("{s}    {s}", .{ arm_indent, skip });
             try g.line("{s}}},", .{arm_indent});

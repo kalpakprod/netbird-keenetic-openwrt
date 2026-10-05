@@ -361,3 +361,15 @@ test "review 144 replaced oneof releases unknown child" {
         \\}
     );
 }
+
+test "review 187 pending map entry owns unknown bytes" {
+    try runGenerated("syntax = \"proto3\"; message Child {} message Parent { map<string, Child> items = 3; string later = 6; }",
+        \\const std = @import("std");
+        \\const c = @import("gen/codec.zig");
+        \\test "append OOM releases child unknown bytes" {
+        \\    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+        \\    try std.testing.expectError(error.OutOfMemory, c.Parent.decode(failing.allocator(), &.{26,4,18,2,16,1}));
+        \\    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        \\}
+    );
+}
