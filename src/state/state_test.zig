@@ -302,3 +302,43 @@ test "cleanupByName deletes on success, preserves on error" {
         m.cleanupByName("nope", Sample, wipeCounter),
     );
 }
+
+test "cleanup flow preserves unregistered sections" {
+    const root = try scratchRoot(std.testing.allocator, "preserve");
+    defer std.testing.allocator.free(root);
+    defer cleanup(root);
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/state.json", .{root});
+    defer std.testing.allocator.free(path);
+
+    {
+        var m = state.Manager.init(std.testing.allocator, tio, path);
+        defer m.deinit();
+        try m.register("known");
+        try m.register("mystery");
+        try m.update("known", .{ .counter = @as(i64, 1), .tags = [_][]const u8{}, .when = "w" });
+        try m.update("mystery", .{ .counter = @as(i64, 2), .tags = [_][]const u8{}, .when = "w" });
+        try m.persist();
+    }
+    {
+        var m = state.Manager.init(std.testing.allocator, tio, path);
+        defer m.deinit();
+        try m.register("known");
+        // caller-driven PerformCleanup: cleanup known, import unknown
+        try m.cleanupByName("known", Sample, wipeCounter);
+        try m.preserveRaw("mystery");
+        try m.persist();
+    }
+    const data = try profile.readFileLseek(tio, std.testing.allocator, path);
+    defer std.testing.allocator.free(data);
+    try std.testing.expectEqualSlices(u8, "{\"known\":null,\"mystery\":{\"counter\":2,\"tags\":[],\"when\":\"w\"}}", data);
+    // import alone never dirties: no rewrite without other changes
+    {
+        var m = state.Manager.init(std.testing.allocator, tio, path);
+        defer m.deinit();
+        try m.preserveRaw("mystery");
+        try m.persist();
+    }
+    const data2 = try profile.readFileLseek(tio, std.testing.allocator, path);
+    defer std.testing.allocator.free(data2);
+    try std.testing.expectEqualSlices(u8, data, data2);
+}
