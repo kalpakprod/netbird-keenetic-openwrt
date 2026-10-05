@@ -107,6 +107,11 @@ pub const Keypair = struct {
     remote_index: u32,
 };
 
+const AllowedEntry = struct {
+    cidr: Cidr,
+    peer: *Peer,
+};
+
 const IndexEntry = struct {
     peer: *Peer,
     keypair: ?*Keypair, // null: entry points at the peer handshake
@@ -114,6 +119,53 @@ const IndexEntry = struct {
 
 pub const UdpSendFn = *const fn (ctx: ?*anyopaque, datagram: []const u8, to: Endpoint) void;
 pub const PacketSinkFn = *const fn (ctx: ?*anyopaque, peer: *Peer, ip_packet: []const u8) void;
+
+/// Peer-facing list API keeps existing callers while assignments update the table.
+pub const AllowedList = struct {
+    items: []Cidr = &.{},
+    list: std.ArrayList(Cidr) = .empty,
+    peer: ?*Peer = null,
+
+    pub fn append(a: *AllowedList, allocator: std.mem.Allocator, c: Cidr) !void {
+        const p = a.peer.?;
+        const d = p.device;
+        // Reserve before changing ownership, so allocation failure is atomic.
+        try a.list.ensureUnusedCapacity(allocator, 1);
+        try d.allowed_ips.ensureUnusedCapacity(d.allocator, 1);
+        for (d.allowed_ips.items) |*entry| {
+            if (entry.cidr.bits == c.bits and entry.cidr.matches(c.net)) {
+                const old = &entry.peer.allowed;
+                var i: usize = 0;
+                while (i < old.list.items.len) {
+                    const previous = old.list.items[i];
+                    if (previous.bits == c.bits and previous.matches(c.net)) _ = old.list.orderedRemove(i) else i += 1;
+                }
+                old.items = old.list.items;
+                entry.* = .{ .cidr = c, .peer = p };
+                a.list.appendAssumeCapacity(c);
+                a.items = a.list.items;
+                return;
+            }
+        }
+        d.allowed_ips.appendAssumeCapacity(.{ .cidr = c, .peer = p });
+        a.list.appendAssumeCapacity(c);
+        a.items = a.list.items;
+    }
+
+    pub fn clearRetainingCapacity(a: *AllowedList) void {
+        const p = a.peer.?;
+        var i: usize = 0;
+        while (i < p.device.allowed_ips.items.len) {
+            if (p.device.allowed_ips.items[i].peer == p) _ = p.device.allowed_ips.orderedRemove(i) else i += 1;
+        }
+        a.list.clearRetainingCapacity();
+        a.items = a.list.items;
+    }
+
+    fn deinit(a: *AllowedList, allocator: std.mem.Allocator) void {
+        a.list.deinit(allocator);
+    }
+};
 
 pub const Peer = struct {
     device: *Device,
@@ -129,7 +181,7 @@ pub const Peer = struct {
     last_sent_handshake_ns: i64 = 0, // 0 = never
     last_initiation_consumption_ns: i64 = 0, // 0 = never
     persistent_keepalive_s: u32 = 0,
-    allowed: std.ArrayList(Cidr) = .empty,
+    allowed: AllowedList = .{},
     tx_bytes: u64 = 0,
     rx_bytes: u64 = 0,
 
@@ -161,6 +213,7 @@ pub const Device = struct {
     checker: cookie.CookieChecker,
     peers: std.ArrayList(*Peer) = .empty,
     index_table: std.AutoHashMap(u32, IndexEntry) = undefined,
+    allowed_ips: std.ArrayList(AllowedEntry) = .empty,
     constants: Constants = .{},
     udp_ctx: ?*anyopaque = null,
     udp_send: ?UdpSendFn = null,
@@ -195,6 +248,7 @@ pub const Device = struct {
         }
         d.peers.deinit(d.allocator);
         d.index_table.deinit();
+        d.allowed_ips.deinit(d.allocator);
     }
 
     /// NewPeer (no endpoint yet, like the Go version).
@@ -209,10 +263,17 @@ pub const Device = struct {
             .handshake = try noise.Handshake.init(d.static_private, remote_static, psk),
             .cookie_gen = cookie.CookieGenerator.init(&remote_static),
         };
+        p.allowed.peer = p;
         p.timers.start();
         errdefer p.deinit(d.allocator);
         try d.peers.append(d.allocator, p);
         return p;
+    }
+
+    fn sourceOwner(d: *const Device, src: [16]u8) ?*Peer {
+        var owner: ?*Peer = null; var best: u8 = 0;
+        for (d.allowed_ips.items) |entry| if (entry.cidr.matches(src) and (owner == null or entry.cidr.bits > best)) { owner = entry.peer; best = entry.cidr.bits; };
+        return owner;
     }
 
     pub fn lookupPeer(d: *Device, remote_static: *const noise.PublicKey) ?*Peer {
@@ -322,19 +383,7 @@ pub const Device = struct {
     fn routeToPeer(d: *Device, ip_packet: []const u8) ?*Peer {
         if (ip_packet.len < 1) return null;
         const dst = dstAddr(ip_packet) orelse return null;
-        var best: ?*Peer = null;
-        var best_bits: u8 = 0;
-        var first = true;
-        for (d.peers.items) |p| {
-            for (p.allowed.items) |c| {
-                if (c.matches(dst) and (first or c.bits >= best_bits)) {
-                    best = p;
-                    best_bits = c.bits;
-                    first = false;
-                }
-            }
-        }
-        return best;
+        return d.sourceOwner(dst);
     }
 
     /// needsHandshake.
@@ -651,7 +700,8 @@ pub const Device = struct {
         if (packet.len == 0) return; // keepalive
         peer.timers.dataReceived(now_ns, d.constants.timers, d.active());
         const trimmed = trimPacket(packet) orelse return;
-        if (!srcAllowed(peer, trimmed)) return;
+        const src = srcAddr(trimmed) orelse return;
+        if (d.sourceOwner(src) != peer) return;
         if (d.packet_sink) |f| f(d.sink_ctx, peer, trimmed);
     }
 
@@ -736,13 +786,4 @@ fn trimPacket(packet: []const u8) ?[]const u8 {
         },
         else => return null,
     }
-}
-
-/// Receive-side allowedips source check.
-fn srcAllowed(peer: *Peer, packet: []const u8) bool {
-    const src = srcAddr(packet) orelse return false;
-    for (peer.allowed.items) |c| {
-        if (c.matches(src)) return true;
-    }
-    return false;
 }
