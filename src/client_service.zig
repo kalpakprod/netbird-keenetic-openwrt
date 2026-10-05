@@ -256,8 +256,9 @@ pub const Adapter = struct {
             .io = a.io,
             .key = a.config.wg_priv,
         };
-        a.sig_stream = a.sig_client.?.connectStream() catch
-            return error.StartFailed;
+        a.sig_stream = a.sig_client.?.connectStream() catch |err| {
+            return if (err == error.OutOfMemory) error.OutOfMemory else error.StartFailed;
+        };
     }
 
     /// Stage 3: management connection + Sync stream, held open (pumping
