@@ -322,12 +322,17 @@ pub const Device = struct {
     fn routeToPeer(d: *Device, ip_packet: []const u8) ?*Peer {
         if (ip_packet.len < 1) return null;
         const dst = dstAddr(ip_packet) orelse return null;
+        return d.lookupAllowedIP(dst);
+    }
+
+    /// Device-wide longest-prefix ownership, shared by send and receive.
+    fn lookupAllowedIP(d: *Device, address: [16]u8) ?*Peer {
         var best: ?*Peer = null;
         var best_bits: u8 = 0;
         var first = true;
         for (d.peers.items) |p| {
             for (p.allowed.items) |c| {
-                if (c.matches(dst) and (first or c.bits >= best_bits)) {
+                if (c.matches(address) and (first or c.bits >= best_bits)) {
                     best = p;
                     best_bits = c.bits;
                     first = false;
@@ -651,7 +656,8 @@ pub const Device = struct {
         if (packet.len == 0) return; // keepalive
         peer.timers.dataReceived(now_ns, d.constants.timers, d.active());
         const trimmed = trimPacket(packet) orelse return;
-        if (!srcAllowed(peer, trimmed)) return;
+        const src = srcAddr(trimmed) orelse return;
+        if (d.lookupAllowedIP(src) != peer) return;
         if (d.packet_sink) |f| f(d.sink_ctx, peer, trimmed);
     }
 
@@ -738,11 +744,3 @@ fn trimPacket(packet: []const u8) ?[]const u8 {
     }
 }
 
-/// Receive-side allowedips source check.
-fn srcAllowed(peer: *Peer, packet: []const u8) bool {
-    const src = srcAddr(packet) orelse return false;
-    for (peer.allowed.items) |c| {
-        if (c.matches(src)) return true;
-    }
-    return false;
-}

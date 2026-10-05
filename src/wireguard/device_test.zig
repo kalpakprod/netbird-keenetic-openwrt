@@ -352,3 +352,42 @@ test "disallowed source is dropped" {
     try std.testing.expect(h.pb.current != null); // handshake still completed
     try std.testing.expectEqual(@as(usize, 0), h.b_sink.items.len);
 }
+
+test "receive enforces device-wide longest-prefix source ownership" {
+    var h: Harness = undefined;
+    try setup(&h, .{});
+    defer teardown(&h);
+    h.pb.allowed.clearRetainingCapacity();
+    try h.pb.allowed.append(std.testing.allocator, device.Cidr.parseV4("10.0.0.0/24").?);
+    var c = device.Device.init(std.testing.allocator, std.testing.io, clampedKey(0xC3), .{});
+    defer c.deinit();
+    const pc = try c.addPeer(h.b.static_public, psk_zero);
+    const bc = try h.b.addPeer(c.static_public, psk_zero);
+    try bc.allowed.append(std.testing.allocator, device.Cidr.parseV4("10.0.0.1/32").?);
+    try pc.allowed.append(std.testing.allocator, device.Cidr.parseV4("10.0.0.2/32").?);
+    pc.endpoint = h.b_ep;
+    c.udp_ctx = &h;
+    c.udp_send = Harness.udpSend;
+    var buf: [64]u8 = undefined;
+    const packet = ip4Packet(.{ 10, 0, 0, 1 }, .{ 10, 0, 0, 2 }, "owned", &buf);
+    h.a.sendPacket(packet, h.now);
+    try std.testing.expect(h.pb.current != null);
+    try std.testing.expectEqual(@as(usize, 0), h.b_sink.items.len);
+    // Initiate C's session with B. Relay B's response to C explicitly.
+    const Link = struct {
+        receiver: *device.Device,
+        endpoint: device.Endpoint,
+        now: i64,
+        fn send(ctx: ?*anyopaque, datagram: []const u8, _: device.Endpoint) void {
+            const link: *@This() = @ptrCast(@alignCast(ctx));
+            link.receiver.receiveDatagram(datagram, link.endpoint, link.now);
+        }
+    };
+    var to_c = Link{ .receiver = &c, .endpoint = h.b_ep, .now = h.now };
+    h.b.udp_ctx = &to_c;
+    h.b.udp_send = Link.send;
+    c.sendPacket(packet, h.now);
+    try std.testing.expect(bc.current != null);
+    try std.testing.expectEqual(@as(usize, 1), h.b_sink.items.len);
+    try std.testing.expectEqualSlices(u8, packet, h.b_sink.items[0]);
+}
