@@ -88,6 +88,13 @@ const FakeConn = struct {
         return .{ .data = out[0..len] };
     }
 
+    pub fn readMessageDeadline(c: *FakeConn, out: []u8, deadline: i64) !struct { data: []const u8 } {
+        _ = deadline;
+        if (c.server_stream.seek == c.server_stream.end) return error.Timeout;
+        const msg = try c.readMessage(out);
+        return .{ .data = msg.data };
+    }
+
     pub fn close(c: *FakeConn, code: anytype) void {
         _ = c;
         _ = code;
@@ -194,4 +201,21 @@ test "client: subscribe, wait online, transport both ways, healthcheck" {
     const tm = try msgs.unmarshalTransportMsg(fake.written.items);
     try testing.expectEqualStrings("to-peer-two", tm.payload);
     try testing.expectEqual(id2, tm.peer_id);
+}
+
+test "client: deadlines stop blocked auth wait and recv" {
+    var fake: FakeConn = undefined;
+    fake.initInPlace(testing.allocator, &.{});
+    defer fake.deinit();
+    try testing.expectError(error.Timeout, FakeClient.connect(testing.allocator, &fake, .{ .peer_id = "a", .token = "", .deadline_ms = 123 }));
+    try testing.expect(fake.destroyed);
+    fake.deinit();
+    var frame: [9000]u8 = undefined;
+    fake.initInPlace(testing.allocator, authResponseFrame(&frame, "rel://localhost:1"));
+    const c = try FakeClient.connect(testing.allocator, &fake, .{ .peer_id = "a", .token = "" });
+    defer c.destroy();
+    try testing.expectError(error.Timeout, c.waitPeerOnlineDeadline(msgs.hashID("b"), 123));
+    var out: [32]u8 = undefined;
+    try testing.expectError(error.Timeout, c.recvDeadline(&out, 123));
+    try testing.expect(!fake.destroyed);
 }

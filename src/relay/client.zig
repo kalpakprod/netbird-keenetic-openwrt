@@ -14,6 +14,8 @@ pub const messages = msgs;
 pub const auth = @import("auth.zig");
 
 pub const Error = error{
+    Timeout,
+    DeadlineUnsupported,
     HandshakeFailed,
     UnexpectedMessage,
     PeerNotOnline,
@@ -58,7 +60,7 @@ pub fn Client(comptime Conn: type) type {
 
             const msg = try msgs.marshalAuthMsg(c.wbuf, c.own_id, opts.token);
             try c.conn.writeMessage(.binary, msg);
-            try c.expectAuthResponse();
+            try c.expectAuthResponse(opts.deadline_ms);
             return c;
         }
 
@@ -69,9 +71,9 @@ pub fn Client(comptime Conn: type) type {
             c.gpa.destroy(c);
         }
 
-        fn expectAuthResponse(c: *Self) Error!void {
+        fn expectAuthResponse(c: *Self, deadline_ms: ?i64) Error!void {
             var rbuf: [msgs.max_handshake_resp_size]u8 = undefined;
-            const msg = try c.conn.readMessage(&rbuf);
+            const msg = try c.readMessage(&rbuf, deadline_ms);
             _ = try msgs.validateVersion(msg.data);
             const t = try msgs.determineServerMessageType(msg.data);
             if (t != .auth_response) return Error.UnexpectedMessage;
@@ -88,10 +90,14 @@ pub fn Client(comptime Conn: type) type {
         /// Reads until a PeersOnline message lists `dst`; replies to health
         /// checks on the way.
         pub fn waitPeerOnline(c: *Self, dst: msgs.PeerID) Error!void {
+            return c.waitPeerOnlineDeadline(dst, null);
+        }
+
+        pub fn waitPeerOnlineDeadline(c: *Self, dst: msgs.PeerID, deadline_ms: ?i64) Error!void {
             var rbuf: [msgs.max_message_size]u8 = undefined;
             var peers: [msgs.max_peers_per_message]msgs.PeerID = undefined;
             while (true) {
-                const msg = try c.conn.readMessage(&rbuf);
+                const msg = try c.readMessage(&rbuf, deadline_ms);
                 _ = try msgs.validateVersion(msg.data);
                 const t = try msgs.determineServerMessageType(msg.data);
                 switch (t) {
@@ -117,9 +123,13 @@ pub fn Client(comptime Conn: type) type {
         /// Reads the next transport message from any peer, replying to health
         /// checks and skipping state messages.
         pub fn recv(c: *Self, out: []u8) Error!msgs.TransportMsg {
+            return c.recvDeadline(out, null);
+        }
+
+        pub fn recvDeadline(c: *Self, out: []u8, deadline_ms: ?i64) Error!msgs.TransportMsg {
             var rbuf: [msgs.max_message_size]u8 = undefined;
             while (true) {
-                const msg = try c.conn.readMessage(&rbuf);
+                const msg = try c.readMessage(&rbuf, deadline_ms);
                 _ = try msgs.validateVersion(msg.data);
                 const t = try msgs.determineServerMessageType(msg.data);
                 switch (t) {
@@ -137,6 +147,23 @@ pub fn Client(comptime Conn: type) type {
             }
         }
 
+        // Absolute monotonic milliseconds in the transport's clock domain.
+        // readMessageDeadline must bound the entire message read, including
+        // partial frames. Timeout preserves framing and leaves the stream usable.
+        // A transport unable to preserve framing must close itself on timeout.
+        fn readMessage(c: *Self, out: []u8, deadline_ms: ?i64) Error!struct { data: []const u8 } {
+            if (deadline_ms) |deadline| {
+                const T = switch (@typeInfo(Conn)) { .pointer => |p| p.child, else => Conn };
+                if (@hasDecl(T, "readMessageDeadline")) {
+                    const msg = try c.conn.readMessageDeadline(out, deadline);
+                    return .{ .data = msg.data };
+                }
+                return error.DeadlineUnsupported;
+            }
+            const msg = try c.conn.readMessage(out);
+            return .{ .data = msg.data };
+        }
+
         fn writeHealthcheck(c: *Self) Error!void {
             try c.conn.writeMessage(.binary, &msgs.marshalHealthcheck());
         }
@@ -146,6 +173,9 @@ pub fn Client(comptime Conn: type) type {
 pub const AuthOptions = struct {
     /// Raw peer identity; hashed to the PeerID the protocol carries.
     peer_id: []const u8,
+    /// Optional absolute monotonic deadline, enforced by readMessageDeadline.
+    /// Ownership transfers even on failure. Auth timeout destroys the transport.
+    deadline_ms: ?i64 = null,
     /// Token binary from auth.generateToken, keyed with sha256(secret).
     token: []const u8,
 };
