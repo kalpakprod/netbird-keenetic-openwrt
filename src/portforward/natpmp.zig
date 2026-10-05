@@ -170,8 +170,17 @@ pub const Client = struct {
                 resend_ms += resend_base_ms;
                 continue;
             }
-            const n = linux.recvfrom(c.fd, resp_buf.ptr, resp_buf.len, 0, null, null);
+            var from: linux.sockaddr.in = undefined;
+            var from_len: linux.socklen_t = @sizeOf(linux.sockaddr.in);
+            const n = linux.recvfrom(c.fd, resp_buf.ptr, resp_buf.len, 0, @ptrCast(&from), &from_len);
             if (failed(n) or n == 0) return Error.RecvFailed;
+            // NAT-PMP replies are accepted only from the configured gateway and
+            // protocol port. Ignore unrelated datagrams without resetting the
+            // transaction deadline or retransmission schedule.
+            if (from_len < @sizeOf(linux.sockaddr.in) or
+                from.family != linux.AF.INET or
+                from.port != std.mem.nativeToBig(u16, port) or
+                from.addr != @as(u32, @bitCast(c.gateway))) continue;
             return n;
         }
     }

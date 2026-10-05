@@ -154,3 +154,62 @@ test "timeout against silent listener" {
     c.timeout_ms = 300;
     try std.testing.expectError(natpmp.Error.Timeout, c.externalAddress());
 }
+
+fn sourceTestSocket(ip: [4]u8, port_no: u16) !linux.fd_t {
+    const s = linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
+    if (s > 0xfffffffffffff000) return error.SocketFailed;
+    const fd: linux.fd_t = @intCast(s);
+    errdefer _ = linux.close(fd);
+    var sa = linux.sockaddr.in{ .family = linux.AF.INET, .port = std.mem.nativeToBig(u16, port_no), .addr = @bitCast(ip) };
+    if (linux.bind(fd, @ptrCast(&sa), @sizeOf(linux.sockaddr.in)) > 0xfffffffffffff000) return error.BindFailed;
+    return fd;
+}
+
+const SourceTestGateway = struct {
+    gateway: linux.fd_t,
+    foreign: linux.fd_t,
+    wrong_port: linux.fd_t,
+    err: ?anyerror = null,
+
+    fn run(ctx: *@This()) void {
+        ctx.respond() catch |err| { ctx.err = err; };
+    }
+
+    fn respond(ctx: *@This()) !void {
+        var pfd = [_]linux.pollfd{.{ .fd = ctx.gateway, .events = linux.POLL.IN }};
+        if (linux.poll(&pfd, 1, 2000) != 1) return error.NoRequest;
+        var req: [64]u8 = undefined;
+        var peer: linux.sockaddr.in = undefined;
+        var len: linux.socklen_t = @sizeOf(linux.sockaddr.in);
+        if (linux.recvfrom(ctx.gateway, &req, req.len, 0, @ptrCast(&peer), &len) > 0xfffffffffffff000) return error.RecvFailed;
+        var response = [_]u8{ 0, 128, 0, 0, 0, 0, 0, 1, 198, 51, 100, 1 };
+        // Both wrong IP at the protocol port and right IP at a wrong port
+        // arrive before the gateway. Neither may determine the result.
+        if (linux.sendto(ctx.foreign, &response, response.len, 0, @ptrCast(&peer), len) != response.len) return error.SendFailed;
+        if (linux.sendto(ctx.wrong_port, &response, response.len, 0, @ptrCast(&peer), len) != response.len) return error.SendFailed;
+        std.Io.sleep(tio, .fromMilliseconds(50), .awake) catch unreachable;
+        @memcpy(response[8..12], &[_]u8{ 203, 0, 113, 9 });
+        if (linux.sendto(ctx.gateway, &response, response.len, 0, @ptrCast(&peer), len) != response.len) return error.SendFailed;
+    }
+};
+
+test "foreign datagrams are ignored before gateway response" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    // Independent from the saved fixture on 127.0.0.1, in an isolated netns.
+    const gateway = try sourceTestSocket(.{ 127, 0, 0, 2 }, natpmp.port);
+    defer _ = linux.close(gateway);
+    const foreign = try sourceTestSocket(.{ 127, 0, 0, 3 }, natpmp.port);
+    defer _ = linux.close(foreign);
+    const wrong_port = try sourceTestSocket(.{ 127, 0, 0, 2 }, 0);
+    defer _ = linux.close(wrong_port);
+    var ctx = SourceTestGateway{ .gateway = gateway, .foreign = foreign, .wrong_port = wrong_port };
+    const thread = try std.Thread.spawn(.{}, SourceTestGateway.run, .{&ctx});
+    var c = try natpmp.open(.{ 127, 0, 0, 2 });
+    defer c.close();
+    c.timeout_ms = 1000;
+    const result = c.externalAddress();
+    thread.join();
+    if (ctx.err) |err| return err;
+    const ext = try result;
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 203, 0, 113, 9 }, &ext);
+}
