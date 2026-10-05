@@ -128,3 +128,50 @@ test "generate header carries license by path" {
     const bsd = try gen.generate(arena.allocator(), &file, "client/proto/daemon.proto");
     try expectContains(bsd, "BSD-3-Clause");
 }
+
+// Compile and execute the actual generated codec, rather than asserting text.
+// The parent zig test is admitted by swarm-heavy.sh. Its compiler child runs
+// synchronously under that same admission and closes the inherited gate fd.
+fn runGenerated(schema: []const u8, checks: []const u8) !void {
+    if (@import("builtin").target.cpu.arch != .x86_64) return;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var p = try parser.Parser.init(a, schema);
+    const file = try p.parse();
+    const source = try gen.generate(a, &file, "shared/signal/proto/signalexchange.proto");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const wire = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "src/proto/wire.zig", a, .unlimited);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "wire.zig", .data = wire });
+    var codecs = try tmp.dir.createDirPathOpen(std.testing.io, "gen", .{});
+    defer codecs.close(std.testing.io);
+    try codecs.writeFile(std.testing.io, .{ .sub_path = "codec.zig", .data = source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "runtime.zig", .data = checks });
+    var path_buf: [4096]u8 = undefined;
+    const n = try tmp.dir.realPath(std.testing.io, &path_buf);
+    const result = try std.process.run(a, std.testing.io, .{
+        .argv = &.{ "sh", "-c", "exec 9>&-; exec zig test runtime.zig" },
+        .cwd = .{ .path = path_buf[0..n] },
+    });
+    std.debug.print("generated runtime:\n{s}{s}", .{ result.stdout, result.stderr });
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+}
+
+test "generated single case oneof executes" {
+    try runGenerated(
+        "syntax = \"proto3\"; message JobResponse { oneof result { bool accepted = 1; } }",
+        \\const std = @import("std");
+        \\const codec = @import("gen/codec.zig");
+        \\test "single arm size encode decode" {
+        \\    const m = codec.JobResponse{ .result = .{ .accepted = true } };
+        \\    try std.testing.expectEqual(@as(usize, 2), m.size());
+        \\    var buf: [2]u8 = undefined;
+        \\    try m.encode(&buf);
+        \\    try std.testing.expectEqualSlices(u8, &.{8,1}, &buf);
+        \\    var decoded = try codec.JobResponse.decode(std.testing.allocator, &buf);
+        \\    defer decoded.deinit(std.testing.allocator);
+        \\    try std.testing.expect(decoded.result.?.accepted);
+        \\}
+    );
+}

@@ -783,7 +783,7 @@ fn emitOneofSizeArm(g: *Generator, indent: []const u8, o: *const OneofDesc, c: *
             },
         }
     }
-    try g.line("{s}        else => {{}},", .{indent});
+    if (o.cases.len > 1) try g.line("{s}        else => {{}},", .{indent});
     try g.line("{s}    }};", .{indent});
 }
 
@@ -1036,7 +1036,7 @@ fn emitOneofEncodeArm(g: *Generator, indent: []const u8, o: *const OneofDesc, c:
             },
         }
     }
-    try g.line("{s}        else => {{}},", .{indent});
+    if (o.cases.len > 1) try g.line("{s}        else => {{}},", .{indent});
     try g.line("{s}    }};", .{indent});
 }
 
@@ -1354,7 +1354,11 @@ fn emitDeinit(g: *Generator, indent: []const u8, descs: []const FieldDesc, oneof
             },
         }
     }
+    var oneofs_use_alloc = false;
     for (oneofs) |*o| {
+        for (o.cases) |*c| {
+            if (caseUsesAlloc(c)) oneofs_use_alloc = true;
+        }
         try g.line("{s}    if (m.{s}) |*u| {{", .{ indent, o.zig_name });
         try g.line("{s}        switch (u.*) {{", .{indent});
         for (o.cases) |*c| {
@@ -1368,11 +1372,8 @@ fn emitDeinit(g: *Generator, indent: []const u8, descs: []const FieldDesc, oneof
         }
         try g.line("{s}        }}", .{indent});
         try g.line("{s}    }}", .{indent});
-        emitted = true;
     }
-    if (!emitted) {
-        try g.line("{s}    _ = m;", .{indent});
-        try g.line("{s}    _ = a;", .{indent});
-    }
+    if (!emitted and oneofs.len == 0) try g.line("{s}    _ = m;", .{indent});
+    if (!emitted and !oneofs_use_alloc) try g.line("{s}    _ = a;", .{indent});
     try g.line("{s}}}", .{indent});
 }
