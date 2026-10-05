@@ -51,8 +51,14 @@ fn nextCallReceivesTrailers(late: u8, await_headers: bool) !void {
     // this a valid trailers-only successful gRPC response on stream 3.
     const response = [_]u8{
         0x88, 0x0f, 0x10, 16,
-        'a', 'p', 'p', 'l', 'i', 'c', 'a', 't', 'i', 'o', 'n', '/', 'g', 'r', 'p', 'c',
-        0, 11, 'g', 'r', 'p', 'c', '-', 's', 't', 'a', 't', 'u', 's', 1, '0',
+        'a',  'p',  'p',  'l',
+        'i',  'c',  'a',  't',
+        'i',  'o',  'n',  '/',
+        'g',  'r',  'p',  'c',
+        0,    11,   'g',  'r',
+        'p',  'c',  '-',  's',
+        't',  'a',  't',  'u',
+        's',  1,    '0',
     };
     var wire: [256]u8 = undefined;
     var n: usize = 0;
@@ -112,4 +118,36 @@ test "unknown extension before recvMessage" {
 }
 test "unknown extension before awaitHeaders" {
     try nextCallReceivesTrailers(4, true);
+}
+
+test "empty DATA before valid message and trailers" {
+    var wire: [256]u8 = undefined;
+    var n: usize = 0;
+    const headers = [_]u8{ 0x88, 0x0f, 0x10, 16, 'a', 'p', 'p', 'l', 'i', 'c', 'a', 't', 'i', 'o', 'n', '/', 'g', 'r', 'p', 'c' };
+    const trailers = [_]u8{ 0, 11, 'g', 'r', 'p', 'c', '-', 's', 't', 'a', 't', 'u', 's', 1, '0' };
+    appendFrame(&wire, &n, 1, 4, 1, &headers);
+    appendFrame(&wire, &n, 0, 0, 1, "");
+    appendFrame(&wire, &n, 0, 0, 1, &.{ 0, 0, 0, 0, 1, 'x' });
+    appendFrame(&wire, &n, 1, 5, 1, &trailers);
+    var p = Pipe{ .inbound = wire[0..n] };
+    var conn = h2.Conn.init(p.transport());
+    var call = try grpc.startCall(&conn, std.testing.allocator, "/svc/Empty", "localhost", null, std.testing.io);
+    defer call.deinit();
+    try grpc.closeSend(&call);
+    try std.testing.expectEqualStrings("x", (try grpc.recvMessage(&call)).?);
+    try std.testing.expect(try grpc.recvMessage(&call) == null);
+    try std.testing.expectEqual(@as(?u32, 0), call.status());
+}
+test "DATA END_STREAM requires trailers" {
+    var wire: [256]u8 = undefined;
+    var n: usize = 0;
+    const headers = [_]u8{ 0x88, 0x0f, 0x10, 16, 'a', 'p', 'p', 'l', 'i', 'c', 'a', 't', 'i', 'o', 'n', '/', 'g', 'r', 'p', 'c' };
+    appendFrame(&wire, &n, 1, 4, 1, &headers);
+    appendFrame(&wire, &n, 0, 1, 1, "");
+    var p = Pipe{ .inbound = wire[0..n] };
+    var conn = h2.Conn.init(p.transport());
+    var call = try grpc.startCall(&conn, std.testing.allocator, "/svc/Empty", "localhost", null, std.testing.io);
+    defer call.deinit();
+    try grpc.closeSend(&call);
+    try std.testing.expectError(error.GrpcStatusMissing, grpc.recvMessage(&call));
 }
