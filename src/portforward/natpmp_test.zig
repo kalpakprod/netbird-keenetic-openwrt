@@ -169,6 +169,7 @@ const SourceTestGateway = struct {
     gateway: linux.fd_t,
     foreign: linux.fd_t,
     wrong_port: linux.fd_t,
+    empty_foreign: bool = false,
     err: ?anyerror = null,
 
     fn run(ctx: *@This()) void {
@@ -185,7 +186,8 @@ const SourceTestGateway = struct {
         var response = [_]u8{ 0, 128, 0, 0, 0, 0, 0, 1, 198, 51, 100, 1 };
         // Both wrong IP at the protocol port and right IP at a wrong port
         // arrive before the gateway. Neither may determine the result.
-        if (linux.sendto(ctx.foreign, &response, response.len, 0, @ptrCast(&peer), len) != response.len) return error.SendFailed;
+        const foreign_len: usize = if (ctx.empty_foreign) 0 else response.len;
+        if (linux.sendto(ctx.foreign, &response, foreign_len, 0, @ptrCast(&peer), len) != foreign_len) return error.SendFailed;
         if (linux.sendto(ctx.wrong_port, &response, response.len, 0, @ptrCast(&peer), len) != response.len) return error.SendFailed;
         std.Io.sleep(tio, .fromMilliseconds(50), .awake) catch unreachable;
         @memcpy(response[8..12], &[_]u8{ 203, 0, 113, 9 });
@@ -204,7 +206,34 @@ test "foreign datagrams are ignored before gateway response" {
     defer _ = linux.close(wrong_port);
     var ctx = SourceTestGateway{ .gateway = gateway, .foreign = foreign, .wrong_port = wrong_port };
     const thread = try std.Thread.spawn(.{}, SourceTestGateway.run, .{&ctx});
-    var c = try natpmp.open(.{ 127, 0, 0, 2 });
+    var c = natpmp.open(.{ 127, 0, 0, 2 }) catch |err| {
+        thread.join();
+        return err;
+    };
+    defer c.close();
+    c.timeout_ms = 1000;
+    const result = c.externalAddress();
+    thread.join();
+    if (ctx.err) |err| return err;
+    const ext = try result;
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 203, 0, 113, 9 }, &ext);
+}
+
+
+test "empty foreign datagram is ignored before gateway response" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const gateway = try sourceTestSocket(.{ 127, 0, 0, 2 }, natpmp.port);
+    defer _ = linux.close(gateway);
+    const foreign = try sourceTestSocket(.{ 127, 0, 0, 3 }, natpmp.port);
+    defer _ = linux.close(foreign);
+    const wrong_port = try sourceTestSocket(.{ 127, 0, 0, 2 }, 0);
+    defer _ = linux.close(wrong_port);
+    var ctx = SourceTestGateway{ .gateway = gateway, .foreign = foreign, .wrong_port = wrong_port, .empty_foreign = true };
+    const thread = try std.Thread.spawn(.{}, SourceTestGateway.run, .{&ctx});
+    var c = natpmp.open(.{ 127, 0, 0, 2 }) catch |err| {
+        thread.join();
+        return err;
+    };
     defer c.close();
     c.timeout_ms = 1000;
     const result = c.externalAddress();

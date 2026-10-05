@@ -173,7 +173,7 @@ pub const Client = struct {
             var from: linux.sockaddr.in = undefined;
             var from_len: linux.socklen_t = @sizeOf(linux.sockaddr.in);
             const n = linux.recvfrom(c.fd, resp_buf.ptr, resp_buf.len, 0, @ptrCast(&from), &from_len);
-            if (failed(n) or n == 0) return Error.RecvFailed;
+            if (failed(n)) return Error.RecvFailed;
             // NAT-PMP replies are accepted only from the configured gateway and
             // protocol port. Ignore unrelated datagrams without resetting the
             // transaction deadline or retransmission schedule.
