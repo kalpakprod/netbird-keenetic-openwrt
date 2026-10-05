@@ -1,4 +1,4 @@
-// Port of netbird client/internal/dns/upstream.go (v0.79.0), BSD-3-Clause —
+// Port of netbird client/internal/dns/upstream.go (v0.80.0), BSD-3-Clause —
 // the M7 subset: one ordered upstream list (a single "race" group — servers
 // tried in order, the next only on failure), per-upstream timeout, UDP
 // exchange with TCP retry on truncation (ExchangeWithFallback), TCP straight
@@ -6,8 +6,8 @@
 // OPT record stripped from the reply when the client sent none.
 //
 // Not ported (later milestones): multi-group racing of overlapping
-// nameserver groups, UpstreamHealth projection, EDE short-circuit failover,
-// MTU-derived UDP size caps, tunnel-bound client routing.
+// nameserver groups, UpstreamHealth projection,
+// tunnel-bound client routing.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -17,7 +17,8 @@ const Mutex = @import("mutex.zig").Mutex;
 
 pub const upstream_timeout_ms: u32 = 4000; // UpstreamTimeout
 pub const client_timeout_ms: u32 = 5000; // ClientTimeout, > upstream timeout
-pub const advertised_udp_size: u16 = 4096;
+pub const default_mtu: u16 = 1280;
+pub const advertised_udp_size: u16 = default_mtu - 68;
 
 pub const rcode_servfail: u16 = 2;
 pub const rcode_refused: u16 = 5;
@@ -41,6 +42,7 @@ pub const Upstream = struct {
     mu: Mutex = .{},
     servers: std.ArrayListUnmanaged(std.Io.net.IpAddress) = .empty,
     timeout_ms: u32 = upstream_timeout_ms,
+    mtu: u16 = default_mtu,
 
     pub fn init(alloc: std.mem.Allocator) Upstream {
         return .{ .alloc = alloc };
@@ -100,7 +102,7 @@ pub const Upstream = struct {
     /// One upstream exchange: pack (+EDNS0), UDP, TCP retry on truncation.
     /// Errors are upstream failures (fail over); a parsed reply is returned.
     pub fn exchange(u: *Upstream, arena: std.mem.Allocator, addr: std.Io.net.IpAddress, req: *const msg.Message, transport: chain_mod.Transport, timeout_ms: u32) Error!msg.Message {
-        _ = u;
+        const udp_size: u16 = if (u.mtu > 68) u.mtu - 68 else 512;
         // Advertise EDNS0 so the upstream may send EDE and large replies
         // (Go queryUpstream SetEdns0); strip it again on the way back when
         // the client had none.
@@ -108,7 +110,16 @@ pub const Upstream = struct {
         var q = req.*;
         if (!had_edns) {
             const extra = try arena.alloc(msg.RR, 1);
-            extra[0] = msg.makeOpt(advertised_udp_size, false);
+            extra[0] = msg.makeOpt(udp_size, false);
+            q.extra = extra;
+        }
+        // queryUpstream adds OPT before ExchangeWithFallback computes this limit.
+        const client_max = q.isEdns0().?.class;
+        if (transport == .udp) {
+            const extra = try arena.dupe(msg.RR, q.extra);
+            for (extra) |*rr| {
+                if (rr.type == .opt and rr.class > udp_size) rr.class = udp_size;
+            }
             q.extra = extra;
         }
         const wire_buf = try arena.alloc(u8, 16384);
@@ -119,7 +130,9 @@ pub const Upstream = struct {
             .udp => {
                 const res = try exchangeUdp(arena, addr, wire, timeout_ms);
                 if (res.header.truncated) {
-                    return exchangeTcp(arena, addr, wire, timeout_ms);
+                    var retried = try exchangeTcp(arena, addr, wire, timeout_ms);
+                    try truncateReply(arena, &retried, client_max);
+                    return retried;
                 }
                 return res;
             },
@@ -302,4 +315,44 @@ fn nonRetryableEde(response: *const msg.Message) bool {
         }
     }
     return false;
+}
+
+// miekg Msg.Truncate: retain ordered prefixes, reserve OPT, stop at first
+// overflowing record, and preserve TC. Codec packing supplies compression.
+fn truncateReply(arena: std.mem.Allocator, response: *msg.Message, requested: u16) Error!void {
+    const limit = @max(@as(usize, 512), requested);
+    const buf = try arena.alloc(u8, 65535);
+    if ((try msg.pack(arena, response, buf)).len <= limit) return;
+    const original = response.*;
+    const opt = original.isEdns0();
+    response.answer = &.{};
+    response.ns = &.{};
+    response.extra = if (opt) |rr| try arena.dupe(msg.RR, &.{rr.*}) else &.{};
+    var overflow = false;
+    for ([_][]const msg.RR{original.answer, original.ns, original.extra}, 0..) |records, section| {
+        if (overflow) break;
+        var kept: std.ArrayListUnmanaged(msg.RR) = .empty;
+        for (records) |rr| {
+            if (section == 2 and rr.type == .opt) continue;
+            try kept.append(arena, rr);
+            const previous = response.*;
+            switch (section) {
+                0 => response.answer = kept.items,
+                1 => response.ns = kept.items,
+                2 => {
+                    const extra = try arena.alloc(msg.RR, kept.items.len + @as(usize, if (opt != null) 1 else 0));
+                    @memcpy(extra[0..kept.items.len], kept.items);
+                    if (opt) |o| extra[kept.items.len] = o.*;
+                    response.extra = extra;
+                },
+                else => unreachable,
+            }
+            if ((try msg.pack(arena, response, buf)).len > limit) {
+                response.* = previous;
+                overflow = true;
+                break;
+            }
+        }
+    }
+    response.header.truncated = true;
 }

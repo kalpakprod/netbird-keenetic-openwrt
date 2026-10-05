@@ -245,3 +245,64 @@ test "rcode failover and definitive EDE match v080 queryUpstream" {
         }
     }
 }
+
+const DualStub = struct {
+    udp_size: std.atomic.Value(u16) = .init(0),
+    tcp_seen: std.atomic.Value(u32) = .init(0),
+    wrong_tcp_id: std.atomic.Value(bool) = .init(false),
+
+    fn serve(ctx: *anyopaque, arena: std.mem.Allocator, q: *const msg.Message, transport: chain_mod.Transport) chain_mod.ServeError!chain_mod.Outcome {
+        const s: *DualStub = @ptrCast(@alignCast(ctx));
+        if (transport == .udp) {
+            s.udp_size.store(if (q.isEdns0()) |opt| opt.class else 0, .release);
+        } else {
+            _ = s.tcp_seen.fetchAdd(1, .monotonic);
+        }
+        var reply = msg.Message{};
+        reply.setReply(q);
+        if (transport == .udp) {
+            reply.header.truncated = true;
+        } else {
+            if (s.wrong_tcp_id.load(.acquire)) reply.header.id +%= 1;
+            const records = try arena.alloc(msg.RR, 100);
+            for (records) |*rr| rr.* = .{.name = q.question[0].name, .type = .a, .class = 1, .ttl = 30, .data = .{.a = .{203,0,113,20}}};
+            reply.answer = records;
+        }
+        return .{.response = reply};
+    }
+};
+
+test "MTU cap and TCP retry truncate to pre-cap client buffer, TCP direct stays full" {
+    const Server = @import("server.zig").Server;
+    var stub = DualStub{};
+    var chain = chain_mod.Chain.init(std.testing.allocator);
+    defer chain.deinit();
+    try chain.add(".", .{.ctx = &stub, .match_subdomains = true, .serveFn = DualStub.serve}, 0);
+    var server = try Server.bind(.{.ip4 = .{.bytes = .{127,0,0,1}, .port = 0}}, &chain);
+    defer server.close();
+    const thread = try std.Thread.spawn(.{}, Server.serveLoop, .{&server});
+    defer { server.requestStop(); thread.join(); }
+    const addr: std.Io.net.IpAddress = .{.ip4 = .{.bytes = .{127,0,0,1}, .port = try server.localPort()}};
+    var up = upstream_mod.Upstream.init(std.testing.allocator);
+    defer up.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var q = try queryOf(a, "ok.example.", .a);
+    const extra = try a.alloc(msg.RR, 1);
+    extra[0] = msg.makeOpt(1400, true);
+    q.extra = extra;
+    const res = try up.exchange(a, addr, &q, .udp, 1000);
+    try std.testing.expectEqual(@as(u16,1212), stub.udp_size.load(.acquire));
+    try std.testing.expectEqual(@as(u16,1400), q.isEdns0().?.class);
+    var buf: [65535]u8 = undefined;
+    const encoded = try msg.pack(a, &res, &buf);
+    try std.testing.expect(encoded.len <= 1400);
+    try std.testing.expect(res.header.truncated);
+    try std.testing.expect(res.answer.len > 0);
+    const direct = try up.exchange(a, addr, &q, .tcp, 1000);
+    try std.testing.expectEqual(@as(usize,100), direct.answer.len);
+    try std.testing.expect(!direct.header.truncated);
+    stub.wrong_tcp_id.store(true, .release);
+    try std.testing.expectError(error.IdMismatch, up.exchange(a, addr, &q, .tcp, 1000));
+}
