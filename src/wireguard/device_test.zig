@@ -218,7 +218,7 @@ test "unknown peer initiation is dropped" {
     };
     stranger.udp_send = Direct.send;
     stranger.udp_ctx = &h;
-    stranger.sendHandshakeInitiation(sp, false, h.now);
+    try stranger.sendHandshakeInitiation(sp, false, h.now);
     try std.testing.expect(!got_response);
     try std.testing.expect(h.pb.current == null);
 }
@@ -351,4 +351,17 @@ test "disallowed source is dropped" {
     h.a.sendPacket(ip4Packet(.{ 10, 0, 0, 9 }, .{ 10, 0, 0, 2 }, "spoof", &buf), h.now);
     try std.testing.expect(h.pb.current != null); // handshake still completed
     try std.testing.expectEqual(@as(usize, 0), h.b_sink.items.len);
+}
+
+
+test "initiation propagates index allocation failure" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var d = device.Device.init(failing.allocator(), std.testing.io, clampedKey(0xA1), .{});
+    defer d.deinit();
+    const remote = noise.publicKeyFromPrivate(clampedKey(0xB2));
+    const peer = try d.addPeer(remote, psk_zero);
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, d.sendHandshakeInitiation(peer, false, T0));
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(u32, 0), d.index_table.count());
 }
