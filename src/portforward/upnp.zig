@@ -238,11 +238,12 @@ pub fn resolveControlUrl(base: []const u8, location: []const u8, control: []cons
         break :blk root.len;
     };
     const root_auth = root[0..auth_end];
-    if (!std.mem.startsWith(u8, control, "/")) return Error.BadUrl;
-    const total = root_auth.len + control.len;
+    const slash: usize = if (std.mem.startsWith(u8, control, "/")) 0 else 1;
+    const total = root_auth.len + slash + control.len;
     if (total > out.len) return Error.NoSpace;
     @memcpy(out[0..root_auth.len], root_auth);
-    @memcpy(out[root_auth.len..total], control);
+    if (slash != 0) out[root_auth.len] = '/';
+    @memcpy(out[root_auth.len + slash .. total], control);
     return out[0..total];
 }
 
