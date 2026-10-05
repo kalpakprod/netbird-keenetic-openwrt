@@ -11,7 +11,7 @@
 //!   key/value are implicit presence (zero values omitted);
 //! - int32/int64/enum sign-extend to 64 bits (negative -> 10-byte varint);
 //! - unknown fields and known numbers with an unexpected wire type are
-//!   skipped, like protobuf-go;
+//!   preserved as raw bytes, like default protobuf-go Unmarshal;
 //! - nested message recursion is depth-limited (10000).
 
 const std = @import("std");
@@ -516,6 +516,8 @@ fn emitMessage(g: *Generator, m: *const ast.Message, indent: []const u8, scope: 
         try g.line("{s}    {s}: ?{s}_union = null,", .{ indent, o.zig_name, o.name });
     }
 
+    try g.line("{s}    unknown_fields: []const u8 = &.{{}},", .{indent});
+
     // Map entry types and oneof unions come after every field.
     for (descs.items) |*d| {
         if (d.kind != .map) continue;
@@ -655,8 +657,7 @@ fn scalarDecodeExpr(g: *Generator, d: *const FieldDesc, decoder: []const u8) Err
 fn emitSize(g: *Generator, indent: []const u8, order: []const OrderItem) Error!void {
     try g.line("{s}pub fn size(m: *const @This()) usize {{", .{indent});
     if (order.len == 0) {
-        try g.line("{s}    _ = m;", .{indent});
-        try g.line("{s}    return 0;", .{indent});
+        try g.line("{s}    return m.unknown_fields.len;", .{indent});
         try g.line("{s}}}", .{indent});
         return;
     }
@@ -694,7 +695,7 @@ fn emitSize(g: *Generator, indent: []const u8, order: []const OrderItem) Error!v
             try emitOneofSizeArm(g, indent, item.oneof.?, item.case.?);
         }
     }
-    try g.line("{s}    return n;", .{indent});
+    try g.line("{s}    return n + m.unknown_fields.len;", .{indent});
     try g.line("{s}}}", .{indent});
 }
 
@@ -829,12 +830,7 @@ fn emitMessageEncodeLines(g: *Generator, indent: []const u8, number: i32, access
 
 fn emitEncode(g: *Generator, indent: []const u8, order: []const OrderItem) Error!void {
     try g.line("{s}pub fn encode(m: *const @This(), out: []u8) wire.Error!void {{", .{indent});
-    if (order.len == 0) {
-        try g.line("{s}    _ = m;", .{indent});
-        try g.line("{s}    _ = out;", .{indent});
-        try g.line("{s}}}", .{indent});
-        return;
-    }
+
     try g.line("{s}    var e = wire.Encoder.init(out);", .{indent});
     for (order) |item| {
         if (item.field) |d| {
@@ -877,6 +873,9 @@ fn emitEncode(g: *Generator, indent: []const u8, order: []const OrderItem) Error
             try emitOneofEncodeArm(g, indent, item.oneof.?, item.case.?);
         }
     }
+    try g.line("{s}    if (m.unknown_fields.len > e.buf.len - e.len) return error.NoSpaceLeft;", .{indent});
+    try g.line("{s}    @memcpy(e.buf[e.len..][0..m.unknown_fields.len], m.unknown_fields);", .{indent});
+    try g.line("{s}    e.len += m.unknown_fields.len;", .{indent});
     try g.line("{s}}}", .{indent});
 }
 
@@ -1041,30 +1040,15 @@ fn emitOneofEncodeArm(g: *Generator, indent: []const u8, o: *const OneofDesc, c:
 }
 
 fn emitDecode(g: *Generator, indent: []const u8, order: []const OrderItem) Error!void {
-    var uses_alloc = false;
-    for (order) |item| {
-        if (item.field) |d| {
-            if (descUsesAlloc(d)) uses_alloc = true;
-        } else if (item.oneof) |o| {
-            for (o.cases) |*c| {
-                if (caseUsesAlloc(c)) uses_alloc = true;
-            }
-        }
-    }
     try g.line("{s}pub fn decode(a: std.mem.Allocator, buf: []const u8) DecodeError!@This() {{", .{indent});
     try g.line("{s}    return @This().decodeWithDepth(a, buf, default_recursion_depth);", .{indent});
     try g.line("{s}}}", .{indent});
     try g.line("", .{});
     try g.line("{s}pub fn decodeWithDepth(a: std.mem.Allocator, buf: []const u8, depth: u32) DecodeError!@This() {{", .{indent});
     try g.line("{s}    if (depth == 0) return error.RecursionDepth;", .{indent});
-    if (!uses_alloc) try g.line("{s}    _ = a;", .{indent});
-    if (order.len == 0) {
-        try g.line("{s}    _ = buf;", .{indent});
-        try g.line("{s}    return @This(){{}};", .{indent});
-        try g.line("{s}}}", .{indent});
-        return;
-    }
     try g.line("{s}    var m = @This(){{}};", .{indent});
+    try g.line("{s}    var unknown: std.ArrayList(u8) = .empty;", .{indent});
+    try g.line("{s}    defer unknown.deinit(a);", .{indent});
     try g.line("{s}    var d = wire.Decoder.init(buf);", .{indent});
     // Local accumulation lists for repeated/map fields.
     for (order) |item| {
@@ -1087,6 +1071,7 @@ fn emitDecode(g: *Generator, indent: []const u8, order: []const OrderItem) Error
         }
     }
     try g.line("{s}    while (!d.done()) {{", .{indent});
+    try g.line("{s}        const field_start = d.pos;", .{indent});
     try g.line("{s}        const tag = try d.consumeTag();", .{indent});
     try g.line("{s}        switch (tag.num) {{", .{indent});
     for (order) |item| {
@@ -1098,6 +1083,7 @@ fn emitDecode(g: *Generator, indent: []const u8, order: []const OrderItem) Error
     }
     try g.line("{s}            else => {{", .{indent});
     try g.line("{s}                _ = try d.skipField(tag.num, tag.typ);", .{indent});
+    try g.line("{s}                try unknown.appendSlice(a, buf[field_start..d.pos]);", .{indent});
     try g.line("{s}            }},", .{indent});
     try g.line("{s}        }}", .{indent});
     try g.line("{s}    }}", .{indent});
@@ -1110,13 +1096,14 @@ fn emitDecode(g: *Generator, indent: []const u8, order: []const OrderItem) Error
             else => {},
         }
     }
+    try g.line("{s}    m.unknown_fields = try unknown.toOwnedSlice(a);", .{indent});
     try g.line("{s}    return m;", .{indent});
     try g.line("{s}}}", .{indent});
 }
 
 fn emitFieldDecodeArm(g: *Generator, indent: []const u8, d: *const FieldDesc) Error!void {
     const arm_indent = try g.fmt("{s}            ", .{indent});
-    const skip = try g.fmt("{s}_ = try d.skipField(tag.num, tag.typ);", .{arm_indent});
+    const skip = try g.fmt("{s}_ = try d.skipField(tag.num, tag.typ); try unknown.appendSlice(a, buf[field_start..d.pos]);", .{arm_indent});
     switch (d.kind) {
         .scalar_single, .scalar_optional => {
             switch (d.scalar) {
@@ -1175,7 +1162,7 @@ fn emitFieldDecodeArm(g: *Generator, indent: []const u8, d: *const FieldDesc) Er
             try g.line("{s}        try list_{s}.append(a, el);", .{ arm_indent, d.raw });
             try g.line("{s}    }},", .{arm_indent});
             try g.line("{s}    else => {{", .{arm_indent});
-            try g.line("{s}        _ = try d.skipField(tag.num, tag.typ);", .{arm_indent});
+            try g.line("{s}        _ = try d.skipField(tag.num, tag.typ); try unknown.appendSlice(a, buf[field_start..d.pos]);", .{arm_indent});
             try g.line("{s}    }},", .{arm_indent});
             try g.line("{s}}},", .{arm_indent});
         },
@@ -1303,40 +1290,33 @@ fn emitOneofDecodeArm(g: *Generator, indent: []const u8, o: *const OneofDesc, c:
         },
     }
     try g.line("{s}}} else {{", .{arm_indent});
-    try g.line("{s}    _ = try d.skipField(tag.num, tag.typ);", .{arm_indent});
+    try g.line("{s}    _ = try d.skipField(tag.num, tag.typ); try unknown.appendSlice(a, buf[field_start..d.pos]);", .{arm_indent});
     try g.line("{s}}},", .{arm_indent});
 }
 
 fn emitDeinit(g: *Generator, indent: []const u8, descs: []const FieldDesc, oneofs: []const OneofDesc) Error!void {
     try g.line("{s}pub fn deinit(m: *@This(), a: std.mem.Allocator) void {{", .{indent});
-    var emitted = false;
     for (descs) |*d| {
         switch (d.kind) {
             .scalar_single => if (d.scalar == .string or d.scalar == .bytes) {
                 try g.line("{s}    if (m.{s}.len != 0) a.free(m.{s});", .{ indent, d.zig, d.zig });
-                emitted = true;
             },
             .scalar_optional => if (d.scalar == .string or d.scalar == .bytes) {
                 try g.line("{s}    if (m.{s}) |s| if (s.len != 0) a.free(s);", .{ indent, d.zig });
-                emitted = true;
             },
             .message_single => {
                 try g.line("{s}    if (m.{s}) |*c| c.deinit(a);", .{ indent, d.zig });
-                emitted = true;
             },
             .repeated_scalar => {
                 try g.line("{s}    if (m.{s}.len != 0) a.free(m.{s});", .{ indent, d.zig, d.zig });
-                emitted = true;
             },
             .repeated_string => {
                 try g.line("{s}    for (m.{s}) |s| if (s.len != 0) a.free(s);", .{ indent, d.zig });
                 try g.line("{s}    if (m.{s}.len != 0) a.free(m.{s});", .{ indent, d.zig, d.zig });
-                emitted = true;
             },
             .repeated_message => {
                 try g.line("{s}    for (m.{s}) |*c| c.deinit(a);", .{ indent, d.zig });
                 try g.line("{s}    if (m.{s}.len != 0) a.free(m.{s});", .{ indent, d.zig, d.zig });
-                emitted = true;
             },
             .map => {
                 try g.line("{s}    for (m.{s}) |*en| {{", .{ indent, d.zig });
@@ -1350,7 +1330,6 @@ fn emitDeinit(g: *Generator, indent: []const u8, descs: []const FieldDesc, oneof
                 }
                 try g.line("{s}    }}", .{indent});
                 try g.line("{s}    if (m.{s}.len != 0) a.free(m.{s});", .{ indent, d.zig, d.zig });
-                emitted = true;
             },
         }
     }
@@ -1368,11 +1347,7 @@ fn emitDeinit(g: *Generator, indent: []const u8, descs: []const FieldDesc, oneof
         }
         try g.line("{s}        }}", .{indent});
         try g.line("{s}    }}", .{indent});
-        emitted = true;
     }
-    if (!emitted) {
-        try g.line("{s}    _ = m;", .{indent});
-        try g.line("{s}    _ = a;", .{indent});
-    }
+    try g.line("{s}    if (m.unknown_fields.len != 0) a.free(m.unknown_fields);", .{indent});
     try g.line("{s}}}", .{indent});
 }
