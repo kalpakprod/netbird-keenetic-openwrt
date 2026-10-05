@@ -415,7 +415,8 @@ pub const Conn = struct {
                 .headers => |hd| try c.onHeaders(hd, h.stream_id),
                 .continuation => |cc| try c.onContinuation(cc, h.stream_id),
                 .rst_stream => |r| blk: {
-                    if (c.findStream(h.stream_id)) |sm| sm.state = .closed;
+                    const sm = c.findStream(h.stream_id) orelse break :blk null;
+                    sm.state = .closed;
                     break :blk Event{ .rst = .{ .stream_id = h.stream_id, .code = r.err_code } };
                 },
                 .goaway => |g| blk: {
