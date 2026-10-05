@@ -355,7 +355,9 @@ fn handshake(
     _ = std.base64.standard.Encoder.encode(&key_b64, &key_raw);
 
     var host_buf: [256]u8 = undefined;
-    const hostport = if (port == 80) host else try std.fmt.bufPrint(&host_buf, "{s}:{d}", .{ host, port });
+    const bracketed = std.mem.indexOfScalar(u8, host, ':') != null and !std.mem.startsWith(u8, host, "[");
+    const host_fmt = if (bracketed) try std.fmt.bufPrint(&host_buf, "[{s}]", .{host}) else host;
+    const hostport = if (port == 80) host_fmt else try std.fmt.bufPrint(&host_buf, "{s}:{d}", .{ host_fmt, port });
 
     var req_buf: [1024]u8 = undefined;
     const req = try std.fmt.bufPrint(&req_buf, "GET {s} HTTP/1.1\r\n" ++
