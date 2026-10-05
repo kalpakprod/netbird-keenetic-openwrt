@@ -7,7 +7,7 @@
 //!   use null presence;
 //! - repeated packable scalars encode packed (a single LEN record); the
 //!   decoder accepts both packed and unpacked forms;
-//! - maps encode as repeated entry messages preserving decode order; entry
+//! - maps encode as repeated entry messages in deterministic key order; entry
 //!   key/value are implicit presence (zero values omitted);
 //! - int32/int64/enum sign-extend to 64 bits (negative -> 10-byte varint);
 //! - unknown fields and known numbers with an unexpected wire type are
@@ -252,7 +252,7 @@ pub fn generate(a: std.mem.Allocator, file: *const ast.File, source_path: []cons
     try g.line("//! Port of netbird {s} (v0.79.0), {s}.", .{ source_path, license });
     try g.line("//! Codecs on top of src/proto/wire.zig; marshal order follows", .{});
     try g.line("//! protobuf-go: fields ascending by number, zero values skipped,", .{});
-    try g.line("//! packed repeated scalars, map entries in decode order.", .{});
+    try g.line("//! packed repeated scalars, map entries in deterministic key order.", .{});
     try g.line("", .{});
     try g.line("const std = @import(\"std\");", .{});
     try g.line("const wire = @import(\"../wire.zig\");", .{});
@@ -893,7 +893,26 @@ fn scalarEncodeStmt(g: *Generator, d: *const FieldDesc, access: []const u8) Erro
 }
 
 fn emitMapEncode(g: *Generator, indent: []const u8, d: *const FieldDesc) Error!void {
-    try g.line("{s}    for (m.{s}) |*en| {{", .{ indent, d.zig });
+    const less = switch (d.map_key) {
+        .string, .bytes => try g.dup("std.mem.order(u8, candidate.key, en.key) == .lt"),
+        .boolean => try g.dup("!candidate.key and en.key"),
+        else => try g.dup("candidate.key < en.key"),
+    };
+    const greater = switch (d.map_key) {
+        .string, .bytes => try g.dup("std.mem.order(u8, candidate.key, previous.key) == .gt"),
+        .boolean => try g.dup("candidate.key and !previous.key"),
+        else => try g.dup("candidate.key > previous.key"),
+    };
+    try g.line("{s}    {{", .{indent});
+    try g.line("{s}    var previous_entry: ?*const {s}_Entry = null;", .{indent, d.raw});
+    try g.line("{s}    while (true) {{", .{indent});
+    try g.line("{s}        var next_entry: ?*const {s}_Entry = null;", .{indent, d.raw});
+    try g.line("{s}        for (m.{s}) |*candidate| {{", .{indent, d.zig});
+    try g.line("{s}            if (previous_entry) |previous| if (!({s})) continue;", .{indent, greater});
+    try g.line("{s}            if (next_entry) |en| {{ if ({s}) next_entry = candidate; }} else next_entry = candidate;", .{indent, less});
+    try g.line("{s}        }}", .{indent});
+    try g.line("{s}        const en = next_entry orelse break;", .{indent});
+    try g.line("{s}        previous_entry = en;", .{indent});
     try g.line("{s}        var esz: usize = 0;", .{indent});
     try emitMapEntrySizeLines(g, indent, d);
     try g.line("{s}        try e.appendTag({d}, .bytes);", .{ indent, d.number });
@@ -954,6 +973,7 @@ fn emitMapEncode(g: *Generator, indent: []const u8, d: *const FieldDesc) Error!v
             },
         }
     }
+    try g.line("{s}    }}", .{indent});
     try g.line("{s}    }}", .{indent});
 }
 
@@ -1211,7 +1231,22 @@ fn emitFieldDecodeArm(g: *Generator, indent: []const u8, d: *const FieldDesc) Er
             try g.line("{s}            }},", .{arm_indent});
             try g.line("{s}        }}", .{arm_indent});
             try g.line("{s}    }}", .{arm_indent});
-            try g.line("{s}    try list_{s}.append(a, en);", .{ arm_indent, d.raw });
+            const equal = if (d.map_key == .string or d.map_key == .bytes) "std.mem.eql(u8, old.key, en.key)" else "old.key == en.key";
+            try g.line("{s}    var replaced = false;", .{arm_indent});
+            try g.line("{s}    for (list_{s}.items) |*old| {{", .{arm_indent, d.raw});
+            try g.line("{s}        if ({s}) {{", .{arm_indent, equal});
+            if (d.map_key == .string or d.map_key == .bytes) try g.line("{s}            if (old.key.len != 0) a.free(old.key);", .{arm_indent});
+            if (d.map_value_is_message) {
+                try g.line("{s}            old.value.deinit(a);", .{arm_indent});
+            } else if (d.scalar == .string or d.scalar == .bytes) {
+                try g.line("{s}            if (old.value.len != 0) a.free(old.value);", .{arm_indent});
+            }
+            try g.line("{s}            old.* = en;", .{arm_indent});
+            try g.line("{s}            replaced = true;", .{arm_indent});
+            try g.line("{s}            break;", .{arm_indent});
+            try g.line("{s}        }}", .{arm_indent});
+            try g.line("{s}    }}", .{arm_indent});
+            try g.line("{s}    if (!replaced) try list_{s}.append(a, en);", .{ arm_indent, d.raw });
             try g.line("{s}}} else {{", .{arm_indent});
             try g.line("{s}    {s}", .{ arm_indent, skip });
             try g.line("{s}}},", .{arm_indent});
