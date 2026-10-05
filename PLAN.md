@@ -34,3 +34,24 @@ Release requires 100% accepted feature inventory implemented and verified, all r
 ## Initial execution (2026-10-05)
 
 Coordinator run data/tasks/reports: /home/kukuruza/.cache/netbird-zig-context/release-v080-20261005. Exact v0.80 upstream fetched and isolated without touching old reference. New writer worktrees created on committed refs, dirty root retained. First cards: accepted TLS dependency, full inventory, WG UDP/TUN runtime, TURN channel capacity fix (#69), firewall mangle lifetime fix (#63), executable dispatch prerequisite, Linux IPC peer credentials, OIDC device flow. Feature completion and first PRs remain pending; no whole-product readiness claimed.
+
+## Lead handover and current execution (2026-10-06)
+
+Owner 2026-10-06: Claude Sonnet 5.5 is the lead (cards, cross-family review, merges). The pool above (Muse/GLM) is replaced:
+writers are J-Code `codex/gpt-6.1-sol-low` (at most 8 at once), reviewers `codex/gpt-6.1-sol-max`, the final gate review is Opus 5.5 max
+in a separate Claude tab. All 12 terminals live in one tab. Scope stays the whole v0.80, all lanes in parallel, ordered by the DAG above.
+Rules for every worker: `~/.cache/netbird-zig-context/release-v080-20261005/common-v2.md`. Writers may open PRs and fix PRs, never merge.
+
+Cross-family rule: a PR by Sol low is reviewed by Sol max, then by the lead (a different family), and gates by Opus 5.5 max.
+PRs by Muse/GLM already carry a Sol review, so the lead checks the evidence and merges.
+
+State on 2026-10-06 (`origin/main` after #61 and #68): ICE stack (STUN, ICE, TURN) is on main; WireGuard noise/device/timers/cookie and TUN were
+already on main, so #3 and #37 were closed as identical. The bulk of the client (TLS ALPN, H2 conn, gRPC, mgmt, signal, cli, engine, app)
+still sits in the `feat/h2-conn` stack (PR #23) and is not on main. Sol reviews S01-S11 found defects in TLS/H2 adapter, WG source ownership and replay,
+DNS, protogen, device flow, service adapter and relay client; each defect becomes its own fix PR.
+
+Wave 1 lanes (in flight): L1 TLS+H2 adapter, L2 protogen fixes, L3 WG fixes, L4 DNS codec fix, L5 device-flow fix, L6 service adapter,
+L7 local Go upstream stack for e2e, L8 pure-Zig SQLite file layer plus the layer plan; reviews R01 (#119), R02 (port-forwarding stack),
+R03 (landing list for `feat/h2-conn`). Wave 1 gate: login -> management -> signal -> engine -> WG handshake -> direct -> relay -> status -> down ->
+restart against the local Go stack, qemu syscall check for kernel 4.9, RSS and size against the Go baseline, then Opus 5.5 max review.
+No release date is named until two implementation batches are accepted and the critical-path throughput is measured.
