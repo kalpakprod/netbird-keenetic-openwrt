@@ -79,6 +79,7 @@ pub const Header = struct {
         const h = Header{ .raw = buf.* };
         // Validate geometry eagerly so callers never divide by garbage.
         _ = try h.pageSize();
+        _ = try h.usableSize();
         try h.checkVersions();
         try h.checkEncoding();
         return h;
@@ -176,7 +177,10 @@ pub const Header = struct {
 
     /// Usable payload per page: page size minus reserved bytes.
     pub fn usableSize(self: Header) Error!u32 {
-        return (try self.pageSize()) - self.reservedPerPage();
+        const page_size = try self.pageSize();
+        const usable = page_size - self.reservedPerPage();
+        if (usable < 480) return Error.Corrupt;
+        return usable;
     }
 };
 
