@@ -579,3 +579,70 @@ test "runtime adapter vs Go WireGuard over tun namespaces" {
     if (!inUserNamespace()) return error.SkipZigTest;
     return roleX();
 }
+
+test "runtime: TUN hangup propagates through poll and run" {
+    var sk: noise.PrivateKey = @splat(0xA5);
+    noise.clamp(&sk);
+    var dev = device.Device.init(std.testing.allocator, tio, sk, .{});
+    defer dev.deinit();
+    var r = runtime.Runtime.init(std.testing.allocator, &dev, .{});
+    try r.start();
+    defer r.stop();
+    var pipes: [2]linux.fd_t = undefined;
+    try std.testing.expect(linux.pipe2(&pipes, .{}) <= max_errno_usize);
+    r.tun = .{ .fd = pipes[0], .name = undefined, .name_len = 0 };
+    _ = linux.close(pipes[1]);
+    var readiness = [1]linux.pollfd{.{ .fd = pipes[0], .events = linux.POLL.IN }};
+    try std.testing.expectEqual(@as(usize, 1), linux.poll(&readiness, 1, 0));
+    try std.testing.expect(readiness[0].revents & linux.POLL.HUP != 0);
+    try std.testing.expect(readiness[0].revents & linux.POLL.IN == 0);
+    try std.testing.expectError(error.TunClosed, r.poll(0));
+    var stop_flag = std.atomic.Value(bool).init(false);
+    try std.testing.expectError(error.TunClosed, r.run(&stop_flag));
+}
+
+test "runtime: callback send failures are observable and success stays clean" {
+    var sk: noise.PrivateKey = @splat(0xA5);
+    noise.clamp(&sk);
+    var dev = device.Device.init(std.testing.allocator, tio, sk, .{});
+    defer dev.deinit();
+    var r = runtime.Runtime.init(std.testing.allocator, &dev, .{});
+    try r.start();
+    defer r.stop();
+    const target = device.Endpoint.v4(127, 0, 0, 1, r.localPort());
+    dev.udp_send.?(dev.udp_ctx, "packet", target);
+    try std.testing.expectEqual(@as(usize, 0), r.udp_send_failures);
+    try std.testing.expect(r.last_udp_errno == null);
+    try std.testing.expect(r.last_tun_error == null);
+    const saved = r.sock_fd;
+    r.sock_fd = -1;
+    dev.udp_send.?(dev.udp_ctx, "packet", target);
+    r.sock_fd = saved;
+    try std.testing.expectEqual(@as(usize, 1), r.udp_send_failures);
+    try std.testing.expectEqual(@as(?usize, @backingInt(linux.E.BADF)), r.last_udp_errno);
+}
+
+test "runtime: TUN callback write failure is visible" {
+    if (!inUserNamespace()) return error.SkipZigTest;
+    var sk: noise.PrivateKey = @splat(0xA5);
+    noise.clamp(&sk);
+    var dev = device.Device.init(std.testing.allocator, tio, sk, .{});
+    defer dev.deinit();
+    var r = runtime.Runtime.init(std.testing.allocator, &dev, .{ .tun_name = "wgerr%d" });
+    try r.start();
+    defer r.stop();
+    try run(&.{ "ip", "link", "set", r.tunIfName().?, "up" });
+    var remote: noise.PrivateKey = @splat(0xB6);
+    noise.clamp(&remote);
+    const peer = try dev.addPeer(noise.publicKeyFromPrivate(remote), @splat(0));
+    const packet = ipv4Packet(.{10, 1, 0, 1}, .{10, 1, 0, 2});
+    dev.packet_sink.?(dev.sink_ctx, peer, &packet);
+    try std.testing.expectEqual(@as(usize, 0), r.tun_write_failures);
+    try std.testing.expect(r.last_tun_error == null);
+    const saved = r.tun.?.fd;
+    r.tun.?.fd = -1;
+    dev.packet_sink.?(dev.sink_ctx, peer, &packet);
+    r.tun.?.fd = saved;
+    try std.testing.expectEqual(@as(usize, 1), r.tun_write_failures);
+    try std.testing.expectEqual(@as(?runtime.Error, error.WriteFailed), r.last_tun_error);
+}
