@@ -62,6 +62,8 @@ pub const TlsMode = union(enum) {
 pub const ConnectOptions = struct {
     /// IP literal for the Host header, TLS SNI and certificate check.
     host: []const u8,
+    /// TLS SNI and certificate name. Defaults to host when omitted.
+    server_name: ?[]const u8 = null,
     port: u16,
     path: []const u8 = "/",
     tls: TlsMode = .none,
@@ -299,7 +301,7 @@ pub fn connect(gpa: Allocator, io: std.Io, opts: ConnectOptions) !*Conn {
             &net.raw_reader.interface,
             &net.raw_writer.interface,
             .{
-                .host = .{ .explicit = opts.host },
+                .host = .{ .explicit = opts.server_name orelse opts.host },
                 .ca = switch (tls_mode) {
                     .none => unreachable,
                     .self_signed => .self_signed,
