@@ -1,4 +1,4 @@
-// RFC 6455 WebSocket client, plain TCP or TLS (std.crypto.tls, TLS 1.2/1.3).
+// RFC 6455 WebSocket client, plain TCP or TLS (project TLS client, TLS 1.2/1.3).
 // Scope: opening handshake with Sec-WebSocket-Accept verification, masked
 // client frames, fragmented message reassembly with interleaved control
 // frames, automatic pong on ping, close handling. One frame per write, like
@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const TlsClient = @import("tls");
 
 pub const websocket_guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -62,6 +63,8 @@ pub const TlsMode = union(enum) {
 pub const ConnectOptions = struct {
     /// IP literal for the Host header, TLS SNI and certificate check.
     host: []const u8,
+    /// TLS SNI and certificate name. Defaults to host when omitted.
+    server_name: ?[]const u8 = null,
     port: u16,
     path: []const u8 = "/",
     tls: TlsMode = .none,
@@ -94,6 +97,7 @@ pub const Conn = struct {
     net: ?*NetState,
     scratch: []u8,
     close_sent: bool = false,
+    stream_closed: bool = false,
 
     /// Owns the socket and TLS state for connect()-built connections; tests
     /// inject reader/writer pairs instead and leave this null.
@@ -101,7 +105,7 @@ pub const Conn = struct {
         stream: std.Io.net.Stream,
         raw_reader: std.Io.net.Stream.Reader,
         raw_writer: std.Io.net.Stream.Writer,
-        tls_client: ?*std.crypto.tls.Client = null,
+        tls_client: ?*TlsClient = null,
         heap: [4][]u8 = .{ &.{}, &.{}, &.{}, &.{} },
     };
 
@@ -114,7 +118,7 @@ pub const Conn = struct {
             const hdr = try c.readFrameHeader();
             switch (hdr.opcode) {
                 .ping, .pong, .close => {
-                    if (!hdr.fin or hdr.len > 125) return Error.ProtocolError;
+                    if (!hdr.fin or hdr.len > 125 or (hdr.opcode == .close and hdr.len == 1)) return Error.ProtocolError;
                     var ctrl: [125]u8 = undefined;
                     try c.input.readSliceAll(ctrl[0..hdr.len]);
                     switch (hdr.opcode) {
@@ -233,12 +237,16 @@ pub const Conn = struct {
             std.mem.writeInt(u16, &payload, @backingInt(code), .big);
             c.writeFrame(.close, &payload) catch {};
         }
-        if (c.net) |n| n.stream.close(c.io);
+        if (c.net) |n| {
+            if (!c.stream_closed) n.stream.close(c.io);
+            c.stream_closed = true;
+        }
     }
 
     pub fn destroy(c: *Conn) void {
         const gpa = c.gpa;
         if (c.net) |n| {
+            if (!c.stream_closed) n.stream.close(c.io);
             if (n.tls_client) |t| gpa.destroy(t);
             for (n.heap) |buf| if (buf.len > 0) gpa.free(buf);
             gpa.destroy(n);
@@ -269,7 +277,7 @@ pub fn connect(gpa: Allocator, io: std.Io, opts: ConnectOptions) !*Conn {
     // one max-size TLS record.
     const raw_len: usize = switch (tls_mode) {
         .none => 4096,
-        else => std.crypto.tls.Client.min_buffer_len,
+        else => TlsClient.min_buffer_len,
     };
     const read_buf = try gpa.alloc(u8, raw_len);
     errdefer gpa.free(read_buf);
@@ -284,22 +292,22 @@ pub fn connect(gpa: Allocator, io: std.Io, opts: ConnectOptions) !*Conn {
     var input: *std.Io.Reader = &net.raw_reader.interface;
 
     if (tls_mode != .none) {
-        var entropy: [std.crypto.tls.Client.Options.entropy_len]u8 = undefined;
+        var entropy: [TlsClient.Options.entropy_len]u8 = undefined;
         io.random(&entropy);
-        const tls_read_buf = try gpa.alloc(u8, std.crypto.tls.Client.min_buffer_len);
+        const tls_read_buf = try gpa.alloc(u8, TlsClient.min_buffer_len);
         errdefer gpa.free(tls_read_buf);
         const tls_write_buf = try gpa.alloc(u8, 1024);
         errdefer gpa.free(tls_write_buf);
         net.heap[2] = tls_read_buf;
         net.heap[3] = tls_write_buf;
 
-        const client = try gpa.create(std.crypto.tls.Client);
+        const client = try gpa.create(TlsClient);
         errdefer gpa.destroy(client);
-        client.* = try std.crypto.tls.Client.init(
+        client.* = try TlsClient.init(
             &net.raw_reader.interface,
             &net.raw_writer.interface,
             .{
-                .host = .{ .explicit = opts.host },
+                .host = .{ .explicit = opts.server_name orelse opts.host },
                 .ca = switch (tls_mode) {
                     .none => unreachable,
                     .self_signed => .self_signed,
@@ -310,6 +318,7 @@ pub fn connect(gpa: Allocator, io: std.Io, opts: ConnectOptions) !*Conn {
                 .entropy = &entropy,
                 .realtime_now = std.Io.Timestamp.now(io, .real),
             },
+            &.{},
         );
         net.tls_client = client;
         input = &client.reader;
@@ -355,7 +364,7 @@ fn handshake(
     _ = std.base64.standard.Encoder.encode(&key_b64, &key_raw);
 
     var host_buf: [256]u8 = undefined;
-    const hostport = if (port == 80) host else try std.fmt.bufPrint(&host_buf, "{s}:{d}", .{ host, port });
+    const hostport = try formatHost(&host_buf, host, port);
 
     var req_buf: [1024]u8 = undefined;
     const req = try std.fmt.bufPrint(&req_buf, "GET {s} HTTP/1.1\r\n" ++
@@ -411,6 +420,12 @@ fn handshake(
         }
     }
     if (!saw_upgrade or !saw_connection or !saw_accept) return Error.BadAcceptKey;
+}
+
+pub fn formatHost(buf: []u8, host: []const u8, port: u16) ![]const u8 {
+    const bracketed = std.mem.indexOfScalar(u8, host, ':') != null and !std.mem.startsWith(u8, host, "[");
+    if (port == 80) return if (bracketed) try std.fmt.bufPrint(buf, "[{s}]", .{host}) else host;
+    return if (bracketed) try std.fmt.bufPrint(buf, "[{s}]:{d}", .{host, port}) else try std.fmt.bufPrint(buf, "{s}:{d}", .{host, port});
 }
 
 fn takeLine(input: *std.Io.Reader) !?[]const u8 {
