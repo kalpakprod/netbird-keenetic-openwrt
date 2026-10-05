@@ -357,6 +357,7 @@ test "live: tls with self-signed ip-san cert" {
         .port = server.port,
         .path = "/relay",
         .tls = .self_signed,
+        .server_name = "localhost",
     });
     defer conn.destroy();
     // bigger than one TLS record to cross record boundaries
