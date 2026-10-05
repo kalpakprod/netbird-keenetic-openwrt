@@ -51,6 +51,8 @@ pub const Call = struct {
     done: bool = false,
 
     pub fn deinit(c: *Call) void {
+        // resetStream closes locally before attempting the best-effort write.
+        c.conn.resetStream(c.stream_id, .cancel) catch {};
         for (c.resp_headers.items) |h| {
             c.alloc.free(h.name);
             c.alloc.free(h.value);
@@ -271,11 +273,8 @@ pub fn recvMessage(c: *Call) Error!?[]const u8 {
                 if (d.stream_id != c.stream_id) return Error.GrpcUnexpectedStream;
                 try c.rxReserve(d.bytes.len);
                 try c.rx.appendSlice(c.alloc, d.bytes);
-                if (d.bytes.len > 0) {
-                    try c.conn.sendWindowUpdate(c.stream_id, @intCast(d.bytes.len));
-                    try c.conn.sendWindowUpdate(0, @intCast(d.bytes.len));
-                }
-                if (d.end_stream) return Error.GrpcStatusMissing;
+                try c.conn.sendWindowUpdate(c.stream_id, @intCast(d.bytes.len));
+                try c.conn.sendWindowUpdate(0, @intCast(d.bytes.len));
             },
             .trailers => |t| {
                 try c.handleTrailers(t.stream_id, t.fields);
