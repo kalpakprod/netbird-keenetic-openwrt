@@ -199,7 +199,9 @@ pub fn appendLoginHint(
     const base_end = std.mem.indexOfScalar(u8, uri, '#') orelse uri.len;
     const base = uri[0..base_end];
     const q = std.mem.indexOfScalar(u8, base, '?') orelse base.len;
-    if (q < base.len) {
+    // Go net/url rejects the whole raw query before discarding invalid or empty
+    // fields when its separator count implies more than 10000 parameters.
+    if (q < base.len and std.mem.count(u8, base[q + 1 ..], "&") < 10000) {
         var it = std.mem.splitScalar(u8, base[q + 1 ..], '&');
         while (it.next()) |pair| {
             if (pair.len == 0 or std.mem.indexOfScalar(u8, pair, ';') != null) continue;

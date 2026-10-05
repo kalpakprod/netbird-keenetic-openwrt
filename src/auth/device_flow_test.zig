@@ -213,6 +213,27 @@ test "login hint preserves empty query key with Go query encoding" {
     try std.testing.expectEqualStrings("https://example.test/verify?=a+b&bare=&login_hint=new&z=%2F&z=second", normalized);
 }
 
+// Expected outputs from gen/query_bound_oracle.go using Go net/url.
+test "login hint accepts exactly 10000 raw query fields" {
+    var separators: [9998]u8 = undefined;
+    @memset(&separators, '&');
+    const uri = try std.fmt.allocPrint(alloc, "https://example.test/verify?{s}=keep&login%5Fhint=old#frag", .{separators});
+    defer alloc.free(uri);
+    const got = try df.appendLoginHint(alloc, uri, "new");
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings("https://example.test/verify?=keep&login_hint=new#frag", got);
+}
+
+test "login hint discards query exceeding 10000 raw fields" {
+    var separators: [9999]u8 = undefined;
+    @memset(&separators, '&');
+    const uri = try std.fmt.allocPrint(alloc, "https://example.test/verify?{s}=keep&login%5Fhint=old#frag", .{separators});
+    defer alloc.free(uri);
+    const got = try df.appendLoginHint(alloc, uri, "new");
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings("https://example.test/verify?login_hint=new#frag", got);
+}
+
 // ---------------------------------------------------------------------------
 // Token polling: success, pending, slow_down, fatal, expiry, cancellation.
 // ---------------------------------------------------------------------------
