@@ -368,3 +368,10 @@ test "live: tls with self-signed ip-san cert" {
     try std.testing.expectEqualSlices(u8, &payload, msg.data);
     conn.close(.normal);
 }
+
+test "IPv6 Host header uses brackets at default and explicit ports" {
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("[::1]", try ws.formatHost(&buf, "::1", 80));
+    try std.testing.expectEqualStrings("[::1]:443", try ws.formatHost(&buf, "::1", 443));
+    try std.testing.expectEqualStrings("127.0.0.1:443", try ws.formatHost(&buf, "127.0.0.1", 443));
+}

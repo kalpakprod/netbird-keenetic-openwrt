@@ -355,9 +355,7 @@ fn handshake(
     _ = std.base64.standard.Encoder.encode(&key_b64, &key_raw);
 
     var host_buf: [256]u8 = undefined;
-    const bracketed = std.mem.indexOfScalar(u8, host, ':') != null and !std.mem.startsWith(u8, host, "[");
-    const host_fmt = if (bracketed) try std.fmt.bufPrint(&host_buf, "[{s}]", .{host}) else host;
-    const hostport = if (port == 80) host_fmt else try std.fmt.bufPrint(&host_buf, "{s}:{d}", .{ host_fmt, port });
+    const hostport = try formatHost(&host_buf, host, port);
 
     var req_buf: [1024]u8 = undefined;
     const req = try std.fmt.bufPrint(&req_buf, "GET {s} HTTP/1.1\r\n" ++
@@ -413,6 +411,12 @@ fn handshake(
         }
     }
     if (!saw_upgrade or !saw_connection or !saw_accept) return Error.BadAcceptKey;
+}
+
+pub fn formatHost(buf: []u8, host: []const u8, port: u16) ![]const u8 {
+    const bracketed = std.mem.indexOfScalar(u8, host, ':') != null and !std.mem.startsWith(u8, host, "[");
+    if (port == 80) return if (bracketed) try std.fmt.bufPrint(buf, "[{s}]", .{host}) else host;
+    return if (bracketed) try std.fmt.bufPrint(buf, "[{s}]:{d}", .{host, port}) else try std.fmt.bufPrint(buf, "{s}:{d}", .{host, port});
 }
 
 fn takeLine(input: *std.Io.Reader) !?[]const u8 {
