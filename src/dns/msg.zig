@@ -499,8 +499,7 @@ pub const Packer = struct {
 
     /// miekg packDomainName: FQDN required, per-label compression map
     /// inserts at offsets < 0x4000, pointer on first found suffix when
-    /// `compress` is on. The per-label length check counts presentation
-    /// characters like miekg (escapes make it stricter than the wire form).
+    /// `compress` is on. Label limits are measured after escape decoding.
     fn packName(p: *Packer, name: []const u8, compress: bool) Error!void {
         if (name.len == 0) return; // miekg: empty name packs nothing
         if (name[name.len - 1] != '.') return Error.NotFqdn;
@@ -536,7 +535,6 @@ pub const Packer = struct {
                 if (i == 0 and name.len > 1) return Error.BadRdata; // leading dot
                 if (was_dot) return Error.BadRdata; // double dot
                 was_dot = true;
-                if (i - begin >= 1 << 6) return Error.BadRdata; // label too long
 
                 // Compression: the first hit is the longest matching suffix.
                 const is_root_suffix = begin == name.len - 1;
