@@ -243,6 +243,9 @@ pub const FileConfigurator = struct {
     alloc: std.mem.Allocator,
     config_path: [:0]const u8,
     backup_path: [:0]const u8,
+    /// Caller supplies state-manager storage paths, never implicit host paths.
+    state_path: ?[:0]const u8 = null,
+    recovery_path: ?[:0]const u8 = null,
     original_nameservers: []const []const u8 = &.{},
     original_perms: u32 = 0,
 
@@ -261,6 +264,9 @@ pub const FileConfigurator = struct {
     pub fn restore(f: *FileConfigurator) Error!void {
         try copyFile(f.backup_path.ptr, f.config_path.ptr);
         if (failed(linux.unlink(f.backup_path.ptr))) return Error.UnlinkFailed;
+        if (f.state_path) |path| {
+            if (fileExists(path.ptr) and failed(linux.unlink(path.ptr))) return Error.UnlinkFailed;
+        }
     }
 
     /// Port of applyDNSConfig/updateConfig: the caller must have backed the
@@ -293,6 +299,33 @@ pub const FileConfigurator = struct {
             f.restore() catch {}; // Go logs the restore failure and returns the write error
             return err;
         };
+        // Upstream logs indicator failures without failing a successful apply.
+        f.recordShutdown(server_ip) catch {};
+    }
+
+    /// Port of createUncleanShutdownIndicator. The persisted address is the
+    /// file-manager ShutdownState DNSAddress; the recovery copy is separate
+    /// from the ordinary backup, as upstream's state-directory resolv.conf.
+    fn recordShutdown(f: *FileConfigurator, address: []const u8) Error!void {
+        const state = f.state_path orelse return;
+        const recovery = f.recovery_path orelse return Error.OpenFailed;
+        try copyFile(f.backup_path.ptr, recovery.ptr);
+        try writeFile(state.ptr, address, 0o600);
+    }
+
+    pub fn restoreUncleanShutdownDNS(f: *FileConfigurator) Error!void {
+        const state = f.state_path orelse return;
+        if (!fileExists(state.ptr)) return;
+        const recovery = f.recovery_path orelse return Error.OpenFailed;
+        var arena = std.heap.ArenaAllocator.init(f.alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const address = try readFileAlloc(a, state.ptr);
+        const current = try parse(a, try readFileAlloc(a, f.config_path.ptr));
+        // Upstream checks the first nameserver, not byte identity or header.
+        if (current.name_servers.len == 0 or std.mem.eql(u8, current.name_servers[0], address)) {
+            try copyFile(recovery.ptr, f.config_path.ptr);
+        }
     }
 
     /// Port of restoreHostDNS (without the repair watcher, M14+).
