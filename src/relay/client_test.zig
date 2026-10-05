@@ -126,6 +126,7 @@ test "client: auth handshake sends auth msg and consumes authresponse" {
     const token = try auth.generateToken("secret", 3600, 1_700_000_000, &token_buf);
 
     const c = try FakeClient.connect(gpa, &fake, .{ .peer_id = "peer-one", .token = token });
+    try c.subscribe(msgs.hashID("b"));
     defer c.destroy();
 
     // The client must have written exactly the auth message.
@@ -168,6 +169,7 @@ test "client: subscribe, wait online, transport both ways, healthcheck" {
     const token = try auth.generateToken("secret", 3600, 1_700_000_000, &token_buf);
 
     const c = try FakeClient.connect(gpa, &fake, .{ .peer_id = "peer-one", .token = token });
+    try c.subscribe(msgs.hashID("b"));
     defer c.destroy();
     fake.written.clearRetainingCapacity(); // drop the auth msg
 
@@ -213,9 +215,45 @@ test "client: deadlines stop blocked auth wait and recv" {
     var frame: [9000]u8 = undefined;
     fake.initInPlace(testing.allocator, authResponseFrame(&frame, "rel://localhost:1"));
     const c = try FakeClient.connect(testing.allocator, &fake, .{ .peer_id = "a", .token = "" });
+    try c.subscribe(msgs.hashID("b"));
     defer c.destroy();
     try testing.expectError(error.Timeout, c.waitPeerOnlineDeadline(msgs.hashID("b"), 123));
     var out: [32]u8 = undefined;
     try testing.expectError(error.Timeout, c.recvDeadline(&out, 123));
     try testing.expect(!fake.destroyed);
+}
+
+test "client: unsubscribe close and wait errors release state" {
+    var frame: [9000]u8 = undefined;
+    var fake: FakeConn = undefined;
+    fake.initInPlace(testing.allocator, authResponseFrame(&frame, "rel://localhost:1"));
+    defer fake.deinit();
+    const c = try FakeClient.connect(testing.allocator, &fake, .{ .peer_id = "a", .token = "" });
+    try c.subscribe(msgs.hashID("b"));
+    defer c.destroy();
+    const peer = msgs.hashID("b");
+    try c.subscribe(peer);
+    c.unsubscribe(peer);
+    try testing.expectError(error.Canceled, c.waitPeerOnline(peer));
+    try c.subscribe(peer);
+    try testing.expectError(error.Closed, c.waitPeerOnline(peer));
+    var out: [16]u8 = undefined;
+    try testing.expectError(error.Closed, c.recv(&out));
+}
+
+test "client: explicit close sends relay close and is idempotent" {
+    var frame: [9000]u8 = undefined;
+    var fake: FakeConn = undefined;
+    fake.initInPlace(testing.allocator, authResponseFrame(&frame, "rel://localhost:1"));
+    defer fake.deinit();
+    const c = try FakeClient.connect(testing.allocator, &fake, .{ .peer_id = "a", .token = "" });
+    try c.subscribe(msgs.hashID("b"));
+    defer c.destroy();
+    try c.subscribe(msgs.hashID("b"));
+    fake.written.clearRetainingCapacity();
+    c.close();
+    c.close();
+    try testing.expectEqualSlices(u8, &msgs.marshalCloseMsg(), fake.written.items);
+    var out: [16]u8 = undefined;
+    try testing.expectError(error.Closed, c.recv(&out));
 }
