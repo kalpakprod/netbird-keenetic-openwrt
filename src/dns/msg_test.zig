@@ -340,10 +340,15 @@ test "malformed inputs are rejected" {
     const short: [11]u8 = std.mem.zeroes([11]u8);
     try std.testing.expectError(msg.Error.Truncated, msg.unpack(a, &short));
 
-    // header-only message with a bogus qdcount: no bytes for the name
+    // miekg accepts header-only REFUSED responses regardless of section counts.
     var bad = qbuf();
-    std.mem.writeInt(u16, bad[4..6], 1, .big);
-    try std.testing.expectError(msg.Error.Truncated, msg.unpack(a, bad[0..12]));
+    std.mem.writeInt(u16, bad[2..4], 0x8005, .big);
+    for ([_]usize{ 4, 6, 8, 10 }) |off| std.mem.writeInt(u16, bad[off..][0..2], 1, .big);
+    const refused = try msg.unpack(a, bad[0..12]);
+    try std.testing.expectEqual(@as(u16, 5), refused.header.rcode);
+    try std.testing.expect(refused.header.response);
+    try std.testing.expectEqual(@as(usize, 0), refused.question.len);
+    try std.testing.expectEqual(@as(usize, 0), refused.answer.len + refused.ns.len + refused.extra.len);
 
     // self-referencing compression pointer loops until the cap
     var loop = qbuf();
