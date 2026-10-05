@@ -271,8 +271,11 @@ pub fn recvMessage(c: *Call) Error!?[]const u8 {
                 if (d.stream_id != c.stream_id) return Error.GrpcUnexpectedStream;
                 try c.rxReserve(d.bytes.len);
                 try c.rx.appendSlice(c.alloc, d.bytes);
-                try c.conn.sendWindowUpdate(c.stream_id, @intCast(d.bytes.len));
-                try c.conn.sendWindowUpdate(0, @intCast(d.bytes.len));
+                if (d.bytes.len > 0) {
+                    try c.conn.sendWindowUpdate(c.stream_id, @intCast(d.bytes.len));
+                    try c.conn.sendWindowUpdate(0, @intCast(d.bytes.len));
+                }
+                if (d.end_stream) return Error.GrpcStatusMissing;
             },
             .trailers => |t| {
                 try c.handleTrailers(t.stream_id, t.fields);
