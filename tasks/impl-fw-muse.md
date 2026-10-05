@@ -1,0 +1,13 @@
+$stop-that-shit change -- Execute this task card exactly.
+
+```xml
+<task>
+  <goal>M7 (#10) firewall part: iptables backend for the router (filter ACL, nat masquerade for routes, mangle marks), driven by NetBird's firewall manager interface.</goal>
+  <workspace>/home/kukuruza/orca/projects/netbird-zig-keenetic-openwrt. Read AGENTS.md first. Plan: PLAN.md and council/r3-merged.md. Reference: upstream/netbird (with vendor/).</workspace>
+  <authority>May create src/fw/** only. Tests inside unshare -Urn with the host iptables binary (the netns has its own tables); never change host tables. PRs through scripts/pr.sh, body 'Part of #10'. Must not: commit on main, merge your own PR, install anything, ssh anywhere, use sudo/pkexec/root, touch the host network or other files.</authority>
+  <context>Lead decision 3 in PLAN.md: iptables first. Router facts: /opt/sbin/iptables v1.4.21, tables nat, mangle, filter; no nft; ipset not verified, so implement without ipset first and note where upstream uses it. Upstream: client/firewall/iptables/ (manager_linux.go, filter_linux.go, routing_linux.go, chains_linux.go, rule.go, state_linux.go), client/firewall/manager/, client/firewall/create_linux.go. Upstream calls the iptables binary through go-iptables; do the same with the path configurable. Options v1.4.21 does not have (for example -w with seconds) must not be used: check the 1.4.21 man page in the iptables source tag before using an option.</context>
+  <steps>1. Rule model and chain setup/teardown (NETBIRD-* chains, jump rules, idempotent re-apply, cleanup on exit). Test in unshare -Urn: iptables-save before/after shows exactly the expected rules and full cleanup. PR. 2. ACL filter rules from the NetworkMap firewall rules (peer IP, protocol, ports, direction). PR. 3. Routing: masquerade and forward rules for routed networks, marks in mangle. PR.</steps>
+  <rules>Real changes only, no empty commits, one PR per logical step. Review fixes follow AGENTS.md (a fix PR per finding into the reviewed branch). Load limits from AGENTS.md: before zig/go builds check /proc/loadavg and wait while the 1-min load is above 12; one heavy command at a time. Facts from commands you ran. If a step is impossible, write BLOCKED with the reason and continue with the next independent step.</rules>
+  <deliverable>Report /home/kukuruza/.cache/netbird-zig-context/results/impl-fw-muse.md: one-line result, files, PR URLs, commands with output, Not verified list, author model, a progress line after each step (never starting with STATUS:). Last line: STATUS: DONE or STATUS: BLOCKED.</deliverable>
+</task>
+```
