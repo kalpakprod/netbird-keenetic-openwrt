@@ -114,7 +114,7 @@ pub const Conn = struct {
             const hdr = try c.readFrameHeader();
             switch (hdr.opcode) {
                 .ping, .pong, .close => {
-                    if (!hdr.fin or hdr.len > 125) return Error.ProtocolError;
+                    if (!hdr.fin or hdr.len > 125 or (hdr.opcode == .close and hdr.len == 1)) return Error.ProtocolError;
                     var ctrl: [125]u8 = undefined;
                     try c.input.readSliceAll(ctrl[0..hdr.len]);
                     switch (hdr.opcode) {
