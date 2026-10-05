@@ -333,3 +333,116 @@ pub const FileConfigurator = struct {
         return f.restore();
     }
 };
+
+// Port of netbird client/internal/dns/file_repair_unix.go (v0.80.0), BSD-3-Clause
+/// Upstream has no debounce timer: remove watch during repair, then re-add.
+/// This thread owns all repair allocations. The caller stops it before using
+/// the configurator to apply or restore, matching upstream lifecycle ordering.
+pub const Repair = struct {
+    alloc: std.mem.Allocator,
+    config: [:0]u8,
+    backup: [:0]u8,
+    directory: [:0]u8,
+    server: []u8,
+    domains: [][]const u8,
+    state: ?[:0]u8,
+    recovery: ?[:0]u8,
+    mode: u32,
+    fd: linux.fd_t,
+    wd: linux.fd_t,
+    thread: ?std.Thread = null,
+    stopping: std.atomic.Value(bool) = .init(false),
+    const mask = linux.IN.MODIFY | linux.IN.CREATE | linux.IN.DELETE | linux.IN.MOVE;
+    // Only a stop responsiveness timeout, not a repair debounce.
+    const stop_poll_ms = 50;
+
+    pub fn start(a: std.mem.Allocator, fc: *FileConfigurator, domains: []const []const u8, server: []const u8) !*Repair {
+        const r = try a.create(Repair);
+        errdefer a.destroy(r);
+        const config = try a.dupeSentinel(u8, fc.config_path, 0);
+        errdefer a.free(config);
+        const backup = try a.dupeSentinel(u8, fc.backup_path, 0);
+        errdefer a.free(backup);
+        const directory = try a.dupeSentinel(u8, std.fs.path.dirname(config) orelse ".", 0);
+        errdefer a.free(directory);
+        const address = try a.dupe(u8, server);
+        errdefer a.free(address);
+        const copied = try a.alloc([]const u8, domains.len);
+        var count: usize = 0;
+        errdefer { for (copied[0..count]) |d| a.free(d); a.free(copied); }
+        for (domains, 0..) |d, i| { copied[i] = try a.dupe(u8, d); count += 1; }
+        const state = if (fc.state_path) |p| try a.dupeSentinel(u8, p, 0) else null;
+        errdefer if (state) |p| a.free(p);
+        const recovery = if (fc.recovery_path) |p| try a.dupeSentinel(u8, p, 0) else null;
+        errdefer if (recovery) |p| a.free(p);
+        const fd = linux.inotify_init1(linux.IN.CLOEXEC | linux.IN.NONBLOCK);
+        if (failed(fd)) return Error.OpenFailed;
+        errdefer _ = linux.close(@intCast(fd));
+        const wd = linux.inotify_add_watch(@intCast(fd), directory.ptr, mask);
+        if (failed(wd)) return Error.OpenFailed;
+        r.* = .{ .alloc = a, .config = config, .backup = backup, .directory = directory, .server = address,
+            .domains = copied, .state = state, .recovery = recovery, .mode = fc.original_perms, .fd = @intCast(fd), .wd = @intCast(wd) };
+        r.thread = try std.Thread.spawn(.{}, run, .{r});
+        return r;
+    }
+
+    pub fn stop(r: *Repair) void {
+        r.stopping.store(true, .release);
+        if (r.thread) |t| t.join();
+        _ = linux.close(r.fd);
+        const a = r.alloc;
+        a.free(r.config); a.free(r.backup); a.free(r.directory); a.free(r.server);
+        for (r.domains) |d| a.free(d);
+        a.free(r.domains);
+        if (r.state) |p| a.free(p);
+        if (r.recovery) |p| a.free(p);
+        a.destroy(r);
+    }
+
+    fn run(r: *Repair) void {
+        var events: [4096]u8 align(4) = undefined;
+        while (!r.stopping.load(.acquire)) {
+            var pfd = [_]linux.pollfd{.{ .fd = r.fd, .events = linux.POLL.IN, .revents = 0 }};
+            const rc = linux.poll(&pfd, pfd.len, stop_poll_ms);
+            if (failed(rc) or rc == 0) continue;
+            const n = linux.read(r.fd, &events, events.len);
+            if (failed(n)) continue;
+            var offset: usize = 0;
+            var relevant = false;
+            while (offset + 16 <= n) {
+                const bits = std.mem.readInt(u32, events[offset + 4 ..][0..4], .little);
+                const len = std.mem.readInt(u32, events[offset + 12 ..][0..4], .little);
+                if (offset + 16 + len > n) break;
+                const name = std.mem.sliceTo(events[offset + 16 .. offset + 16 + len], 0);
+                if (bits & mask != 0 and std.mem.eql(u8, name, std.fs.path.basename(r.config))) relevant = true;
+                offset += 16 + len;
+            }
+            if (relevant) r.repair() catch {};
+        }
+    }
+
+    fn repair(r: *Repair) !void {
+        var arena = std.heap.ArenaAllocator.init(r.alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const current = try parse(a, try readFileAlloc(a, r.config.ptr));
+        var missing = current.name_servers.len == 0 or !std.mem.eql(u8, current.name_servers[0], r.server);
+        for (r.domains) |domain| {
+            var found = false;
+            for (current.search_domains) |d| if (std.mem.eql(u8, domain, d)) { found = true; break; };
+            if (!found) missing = true;
+        }
+        if (!missing) return;
+        _ = linux.inotify_rm_watch(r.fd, r.wd);
+        defer {
+            const wd = linux.inotify_add_watch(r.fd, r.directory.ptr, mask);
+            if (!failed(wd)) r.wd = @intCast(wd) else r.stopping.store(true, .release);
+        }
+        const merged = try mergeSearchDomains(a, r.domains, current.search_domains);
+        const content = try prepareContent(a, r.backup, merged, &.{r.server}, current.others);
+        try writeFile(r.config.ptr, content, r.mode);
+        var fc = FileConfigurator{ .alloc = a, .config_path = r.config, .backup_path = r.backup,
+            .state_path = r.state, .recovery_path = r.recovery };
+        fc.recordShutdown(r.server) catch {};
+    }
+};

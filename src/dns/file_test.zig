@@ -251,3 +251,41 @@ fn testWrite(path: [*:0]const u8, contents: []const u8) !void {
     defer _ = linux.close(@intCast(fd));
     try testing.expectEqual(contents.len, linux.write(@intCast(fd), contents.ptr, contents.len));
 }
+
+test "repair watcher external write stop and allocator cleanup" {
+    const tp = tempPaths();
+    defer _ = linux.rmdir(tp.dir.ptr);
+    defer _ = linux.unlink(tp.config.ptr);
+    defer _ = linux.unlink(tp.backup.ptr);
+    try testWrite(tp.config.ptr, "nameserver 8.8.8.8\n");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var fc = file.FileConfigurator{ .alloc = arena.allocator(), .config_path = tp.config, .backup_path = tp.backup };
+    try fc.backup();
+    try fc.apply(&.{"nb.example"}, "100.100.111.1");
+    const watcher = try file.Repair.start(testing.allocator, &fc, &.{"nb.example"}, "100.100.111.1");
+    var stopped = false;
+    defer if (!stopped) watcher.stop();
+    try testWrite(tp.config.ptr, "search external.example\nnameserver 9.9.9.9\n");
+    var repaired = false;
+    for (0..200) |_| {
+        var delay = linux.timespec{ .sec = 0, .nsec = 10_000_000 };
+        _ = linux.nanosleep(&delay, null);
+        const raw = try file.readFileAlloc(testing.allocator, tp.config.ptr);
+        defer testing.allocator.free(raw);
+        if (std.mem.indexOf(u8, raw, "nameserver 100.100.111.1") != null and std.mem.indexOf(u8, raw, "nb.example") != null) {
+            try testing.expect(std.mem.indexOf(u8, raw, "external.example") != null);
+            repaired = true;
+            break;
+        }
+    }
+    try testing.expect(repaired);
+    watcher.stop();
+    stopped = true;
+    try testWrite(tp.config.ptr, "nameserver 9.9.9.9\n");
+    var delay = linux.timespec{ .sec = 0, .nsec = 30_000_000 };
+    _ = linux.nanosleep(&delay, null);
+    const raw = try file.readFileAlloc(testing.allocator, tp.config.ptr);
+    defer testing.allocator.free(raw);
+    try testing.expectEqualStrings("nameserver 9.9.9.9\n", raw);
+}
