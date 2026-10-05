@@ -232,13 +232,13 @@ pub const Device = struct {
 
     // -- index table (indextable.go) --
 
-    fn newIndexForHandshake(d: *Device, peer: *Peer) u32 {
+    fn newIndexForHandshake(d: *Device, peer: *Peer) std.mem.Allocator.Error!u32 {
         while (true) {
             var b: [4]u8 = undefined;
             d.io.random(&b);
             const index = std.mem.readInt(u32, &b, .little);
             if (d.index_table.contains(index)) continue;
-            d.index_table.put(index, .{ .peer = peer, .keypair = null }) catch continue;
+            try d.index_table.put(index, .{ .peer = peer, .keypair = null });
             return index;
         }
     }
@@ -267,10 +267,10 @@ pub const Device = struct {
     pub fn pollPeer(d: *Device, peer: *Peer, now_ns: i64) void {
         const tc = d.constants.timers;
         const a = peer.timers.poll(now_ns, tc, d.jitterMs(), d.active());
-        if (a.retransmit_handshake) d.sendHandshakeInitiation(peer, true, now_ns);
+        if (a.retransmit_handshake) d.sendHandshakeInitiation(peer, true, now_ns) catch {};
         if (a.give_up) peer.flushStaged(d.allocator);
         if (a.send_keepalive) d.sendKeepalive(peer, now_ns);
-        if (a.new_handshake) d.sendHandshakeInitiation(peer, false, now_ns);
+        if (a.new_handshake) d.sendHandshakeInitiation(peer, false, now_ns) catch {};
         if (a.zero_key_material) d.zeroAndFlushAll(peer);
         if (a.persistent_keepalive and peer.persistent_keepalive_s > 0) {
             d.sendKeepalive(peer, now_ns);
@@ -348,7 +348,7 @@ pub const Device = struct {
     fn flushPeer(d: *Device, peer: *Peer, now_ns: i64) void {
         if (peer.staged.items.len == 0 or !d.up) return;
         if (d.needsHandshake(peer, now_ns)) {
-            d.sendHandshakeInitiation(peer, false, now_ns);
+            d.sendHandshakeInitiation(peer, false, now_ns) catch {};
             return;
         }
         const kp = peer.current.?;
@@ -358,7 +358,7 @@ pub const Device = struct {
             const packet = peer.staged.items[i];
             if (kp.transport.send_nonce >= noise.reject_after_messages) {
                 kp.transport.send_nonce = noise.reject_after_messages;
-                d.sendHandshakeInitiation(peer, false, now_ns);
+                d.sendHandshakeInitiation(peer, false, now_ns) catch {};
                 break;
             }
             d.sealAndEmit(peer, packet, kp);
@@ -409,22 +409,22 @@ pub const Device = struct {
         if (kp.transport.send_nonce > noise.rekey_after_messages or
             (kp.is_initiator and now_ns - kp.created_ns > d.constants.rekey_after_time_ns))
         {
-            d.sendHandshakeInitiation(peer, false, now_ns);
+            d.sendHandshakeInitiation(peer, false, now_ns) catch {};
         }
     }
 
     /// SendHandshakeInitiation with the RekeyTimeout throttle.
-    pub fn sendHandshakeInitiation(d: *Device, peer: *Peer, is_retry: bool, now_ns: i64) void {
+    pub fn sendHandshakeInitiation(d: *Device, peer: *Peer, is_retry: bool, now_ns: i64) std.mem.Allocator.Error!void {
         if (!is_retry) peer.timers.handshake_attempts = 0;
         if (peer.last_sent_handshake_ns != 0 and
             now_ns - peer.last_sent_handshake_ns < d.constants.timers.rekey_timeout_ns) return;
         peer.last_sent_handshake_ns = now_ns;
-        d.sendHandshakeInitiationInner(peer, now_ns);
+        try d.sendHandshakeInitiationInner(peer, now_ns);
     }
 
-    fn sendHandshakeInitiationInner(d: *Device, peer: *Peer, now_ns: i64) void {
+    fn sendHandshakeInitiationInner(d: *Device, peer: *Peer, now_ns: i64) std.mem.Allocator.Error!void {
         d.deleteIndex(peer.handshake.local_index);
-        const index = d.newIndexForHandshake(peer);
+        const index = try d.newIndexForHandshake(peer);
         const ephemeral = noise.generatePrivateKey(d.io);
         const stamp = stampFor(now_ns);
         const msg = peer.handshake.createInitiation(ephemeral, index, stamp) catch return;
@@ -441,7 +441,7 @@ pub const Device = struct {
     fn sendHandshakeResponse(d: *Device, peer: *Peer, now_ns: i64) void {
         peer.last_sent_handshake_ns = now_ns;
         d.deleteIndex(peer.handshake.local_index);
-        const index = d.newIndexForHandshake(peer);
+        const index = d.newIndexForHandshake(peer) catch return;
         const ephemeral = noise.generatePrivateKey(d.io);
         const msg = peer.handshake.createResponse(ephemeral, index) catch return;
         var packet: [noise.message_response_size]u8 = undefined;
@@ -518,7 +518,7 @@ pub const Device = struct {
             now_ns - kp.created_ns > c.reject_after_time_ns - c.timers.keepalive_timeout_ns - c.timers.rekey_timeout_ns)
         {
             peer.timers.sent_last_minute_handshake = true;
-            d.sendHandshakeInitiation(peer, false, now_ns);
+            d.sendHandshakeInitiation(peer, false, now_ns) catch {};
         }
     }
 
