@@ -166,3 +166,87 @@ test "send indication path via pion server" {
     try std.testing.expectEqualStrings("echo-back", abuf[0..ra.len]);
     try expectAddrEq(peer, ra.from);
 }
+
+test "channel table binds past the old 16-slot limit" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const srv = parseTestAddr() orelse return error.SkipZigTest;
+
+    var a = try turn.allocate(srv, "zigtest", "zigtestpass", .{});
+    defer a.close();
+
+    // More distinct peers than the old 16-entry table could hold.
+    const n_peers = 20;
+    var fds: [n_peers]linux.fd_t = undefined;
+    var peers: [n_peers]stun.IpAddress = undefined;
+    for (&fds, &peers) |*fd, *peer| {
+        const s = try ice.bindUdp(stun.ip4(.{ 127, 0, 0, 1 }, 0));
+        fd.* = s.fd;
+        peer.* = stun.ip4(.{ 127, 0, 0, 1 }, s.port);
+    }
+    defer {
+        for (fds) |fd| _ = linux.close(fd);
+    }
+
+    // Every binding succeeds with its own sequential channel number and
+    // exactly one table slot per peer (no duplicate slot use).
+    var numbers: [n_peers]u16 = undefined;
+    for (peers, 0..) |peer, i| {
+        numbers[i] = try turn.channelBind(&a, peer);
+        try std.testing.expectEqual(@as(u16, @intCast(turn.min_channel + i)), numbers[i]);
+    }
+    try std.testing.expectEqual(@as(usize, n_peers), a.n_channels);
+
+    // Re-binding an existing peer still returns its number, no new slot.
+    try std.testing.expectEqual(numbers[3], try turn.channelBind(&a, peers[3]));
+    try std.testing.expectEqual(@as(usize, n_peers), a.n_channels);
+
+    // Data path over a channel past the old limit both ways: server
+    // forwards ChannelData to the raw peer and demuxes the reply back
+    // through the table slot for that channel number.
+    try turn.sendTo(&a, peers[n_peers - 1], "late-chan");
+    var pfd = [_]linux.pollfd{.{ .fd = fds[n_peers - 1], .events = linux.POLL.IN }};
+    const prc = linux.poll(&pfd, 1, 5000);
+    try std.testing.expect(prc == 1);
+    try ice.sendTo(fds[n_peers - 1], a.relayed, "late-reply");
+    var buf: [1500]u8 = undefined;
+    const r = try turn.recvFrom(&a, &buf, 5000);
+    try std.testing.expectEqualStrings("late-reply", buf[0..r.len]);
+    try expectAddrEq(peers[n_peers - 1], r.from);
+}
+
+test "channel exhaustion fails cleanly and keeps existing bindings" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const srv = parseTestAddr() orelse return error.SkipZigTest;
+
+    var a = try turn.allocate(srv, "zigtest", "zigtestpass", .{});
+    defer a.close();
+
+    const bound = try ice.bindUdp(stun.ip4(.{ 127, 0, 0, 1 }, 0));
+    defer _ = linux.close(bound.fd);
+    const bound_peer = stun.ip4(.{ 127, 0, 0, 1 }, bound.port);
+    const ch1 = try turn.channelBind(&a, bound_peer);
+    const fresh = try ice.bindUdp(stun.ip4(.{ 127, 0, 0, 1 }, 0));
+    defer _ = linux.close(fresh.fd);
+    const fresh_peer = stun.ip4(.{ 127, 0, 0, 1 }, fresh.port);
+
+    const n_channels = a.n_channels;
+    const n_permissions = a.n_permissions;
+
+    // Number space exhausted: clean error, no permission, no slot.
+    a.next_channel = turn.max_channel + 1;
+    try std.testing.expectError(turn.Error.BadChannel, turn.channelBind(&a, fresh_peer));
+    try std.testing.expectEqual(n_channels, a.n_channels);
+    try std.testing.expectEqual(n_permissions, a.n_permissions);
+    // Existing binding still resolves while exhausted.
+    try std.testing.expectEqual(ch1, try turn.channelBind(&a, bound_peer));
+
+    // Table full (same fixed table): clean error before any server traffic.
+    // White-box: channelFor scans slots [0..n_channels), so simulate a full
+    // table with defined dummy entries, never with undefined memory.
+    a.next_channel = turn.min_channel;
+    @memset(&a.channels, .{ .number = 0, .peer = stun.ip4(.{ 192, 0, 2, 1 }, 1) });
+    a.n_channels = a.channels.len;
+    try std.testing.expectError(turn.Error.BadChannel, turn.channelBind(&a, fresh_peer));
+    try std.testing.expectEqual(a.channels.len, a.n_channels);
+    try std.testing.expectEqual(n_permissions, a.n_permissions);
+}
