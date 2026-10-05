@@ -51,6 +51,8 @@ pub const Call = struct {
     done: bool = false,
 
     pub fn deinit(c: *Call) void {
+        // resetStream closes locally before attempting the best-effort write.
+        c.conn.resetStream(c.stream_id, .cancel) catch {};
         for (c.resp_headers.items) |h| {
             c.alloc.free(h.name);
             c.alloc.free(h.value);
@@ -136,6 +138,9 @@ pub const Call = struct {
             // Trailers-only response.
             try c.takeTrailers(fields);
             c.done = true;
+            c.conn.resetStream(c.stream_id, .no) catch |err| {
+                if (err != error.StreamClosed) return err;
+            };
             if (c.rx_off != c.rx.items.len) return Error.GrpcTruncated;
         }
     }
@@ -145,6 +150,9 @@ pub const Call = struct {
         if (stream_id != c.stream_id) return Error.GrpcUnexpectedStream;
         try c.takeTrailers(fields);
         c.done = true;
+        c.conn.resetStream(c.stream_id, .no) catch |err| {
+            if (err != error.StreamClosed) return err;
+        };
         if (c.rx_off != c.rx.items.len) return Error.GrpcTruncated;
     }
 
@@ -258,9 +266,11 @@ fn findField(fields: []const h2.HeaderField, name: []const u8) ?[]const u8 {
 /// the next recvMessage or deinit. Returns null at trailers (then status()
 /// is set). Copies everything out of the conn's reused buffers immediately.
 pub fn recvMessage(c: *Call) Error!?[]const u8 {
-    if (c.done) return null;
     while (true) {
         if (try c.popMessage()) |msg| return msg;
+        // Remote END_STREAM may leave several complete messages queued.
+        // Drain them, but never read another frame after terminal completion.
+        if (c.done) return null;
         const ev = try c.conn.readNext() orelse continue;
         switch (ev) {
             .response_headers => |h| {
@@ -271,8 +281,21 @@ pub fn recvMessage(c: *Call) Error!?[]const u8 {
                 if (d.stream_id != c.stream_id) return Error.GrpcUnexpectedStream;
                 try c.rxReserve(d.bytes.len);
                 try c.rx.appendSlice(c.alloc, d.bytes);
-                try c.conn.sendWindowUpdate(c.stream_id, @intCast(d.bytes.len));
-                try c.conn.sendWindowUpdate(0, @intCast(d.bytes.len));
+                if (d.bytes.len > 0) {
+                    try c.conn.sendWindowUpdate(c.stream_id, @intCast(d.bytes.len));
+                    try c.conn.sendWindowUpdate(0, @intCast(d.bytes.len));
+                }
+                if (d.end_stream) {
+                    // grpc-go handleData: END_STREAM without trailers is Internal.
+                    c.status_code = 13;
+                    try c.status_msg.appendSlice(c.alloc, "server closed the stream without sending trailers");
+                    c.done = true;
+                    c.conn.resetStream(c.stream_id, .cancel) catch |err| {
+                        if (err != error.StreamClosed) return err;
+                    };
+                    if (try c.popMessage()) |msg| return msg;
+                    return null;
+                }
             },
             .trailers => |t| {
                 try c.handleTrailers(t.stream_id, t.fields);
