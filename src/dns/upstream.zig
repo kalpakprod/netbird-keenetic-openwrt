@@ -82,7 +82,9 @@ pub const Upstream = struct {
         for (servers) |srv| {
             var res = u.exchange(arena, srv, req, transport, timeout_ms) catch continue;
             if (!res.header.response) continue; // not a response
-            if (res.header.rcode == rcode_servfail or res.header.rcode == rcode_refused) continue;
+            // Valid SERVFAIL/REFUSED are reachable per-question outcomes.
+            // Health projection is separate; retry unless EDE is definitive.
+            if ((res.header.rcode == rcode_servfail or res.header.rcode == rcode_refused) and !nonRetryableEde(&res)) continue;
             // clear the Zero bit: upstream servers must not be able to
             // trigger our internal fallthrough signaling (writeSuccessResponse)
             res.header.zero = false;
@@ -287,4 +289,17 @@ pub fn stripOpt(arena: std.mem.Allocator, m: *msg.Message) void {
         }
     }
     m.extra = out;
+}
+
+fn nonRetryableEde(response: *const msg.Message) bool {
+    const opt = response.isEdns0() orelse return false;
+    for (opt.data.opt) |option| {
+        if (option.code != 15 or option.data.len < 2) continue;
+        const code = std.mem.readInt(u16, option.data[0..2], .big);
+        switch (code) {
+            1, 2, 5...12, 15...18 => return true,
+            else => {},
+        }
+    }
+    return false;
 }

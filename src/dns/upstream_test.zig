@@ -24,6 +24,7 @@ const Stub = struct {
     drop_queries: std.atomic.Value(bool) = .init(false), // never answer
     seen: std.atomic.Value(u32) = .init(0),
     port: u16 = 0,
+    ede: std.atomic.Value(u16) = .init(65535),
     wrong_id: std.atomic.Value(bool) = .init(false),
 
     fn start(name: []const u8, ip: [4]u8) !*Stub {
@@ -87,6 +88,17 @@ const Stub = struct {
                 reply.header.rcode = s.rcode_override.load(.acquire);
             } else {
                 reply.header.rcode = 3; // NXDOMAIN
+            }
+            const ede = s.ede.load(.acquire);
+            if (ede != 65535) {
+                const extra = arena.allocator().alloc(msg.RR, 1) catch continue;
+                const opts = arena.allocator().alloc(msg.Option, 1) catch continue;
+                const data = arena.allocator().alloc(u8, 2) catch continue;
+                std.mem.writeInt(u16, data[0..2], ede, .big);
+                opts[0] = .{.code = 15, .data = data};
+                extra[0] = msg.makeOpt(1232, false);
+                extra[0].data = .{.opt = opts};
+                reply.extra = extra;
             }
             const wire = msg.pack(arena.allocator(), &reply, &buf) catch continue;
             const dest: *const linux.sockaddr = @ptrCast(@alignCast(&client));
@@ -205,4 +217,31 @@ test "wrong UDP ID is ignored and next upstream answers after timeout" {
     try std.testing.expectEqual(q.header.id, out.response.header.id);
     try std.testing.expectEqualSlices(u8, &.{203,0,113,10}, &out.response.answer[0].data.a);
     try std.testing.expectEqual(@as(u32, 1), good.seen.load(.acquire));
+}
+
+test "rcode failover and definitive EDE match v080 queryUpstream" {
+    const primary = try Stub.start("ok.example.", .{203,0,113,11});
+    defer primary.shutdown();
+    const fallback = try Stub.start("ok.example.", .{203,0,113,12});
+    defer fallback.shutdown();
+    var up = upstream_mod.Upstream.init(std.testing.allocator);
+    defer up.deinit();
+    try up.addServer(.{.ip4 = .{.bytes = .{127,0,0,1}, .port = primary.port}});
+    try up.addServer(.{.ip4 = .{.bytes = .{127,0,0,1}, .port = fallback.port}});
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const q = try queryOf(arena.allocator(), "ok.example.", .a);
+    for ([_]u16{0,3,2,5}) |rcode| {
+        primary.rcode_override.store(rcode, .release);
+        for (0..25) |code| {
+            primary.ede.store(@intCast(code), .release);
+            const before = fallback.seen.load(.acquire);
+            const out = try up.handler().serve(arena.allocator(), &q, .udp);
+            const definitive = (code >= 1 and code <= 2) or (code >= 5 and code <= 12) or (code >= 15 and code <= 18);
+            const retry = (rcode == 2 or rcode == 5) and !definitive;
+            try std.testing.expectEqual(if (retry) @as(u16,0) else rcode, out.response.header.rcode);
+            try std.testing.expectEqual(before + @as(u32, if (retry) 1 else 0), fallback.seen.load(.acquire));
+            try std.testing.expect(out.response.isEdns0() == null);
+        }
+    }
 }
