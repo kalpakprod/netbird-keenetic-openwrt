@@ -175,11 +175,11 @@ test "login hint mutates query replacing existing key and keeping fragment" {
     // Appends to an existing query.
     const got1 = try df.appendLoginHint(alloc, "https://idp/a?x=1", "user@example.com");
     defer alloc.free(got1);
-    try std.testing.expectEqualStrings("https://idp/a?x=1&login_hint=" ++ enc, got1);
+    try std.testing.expectEqualStrings("https://idp/a?login_hint=" ++ enc ++ "&x=1", got1);
     // Fragment stays out of the query.
     const got2 = try df.appendLoginHint(alloc, "https://idp/a?x=1#frag", "user@example.com");
     defer alloc.free(got2);
-    try std.testing.expectEqualStrings("https://idp/a?x=1&login_hint=" ++ enc ++ "#frag", got2);
+    try std.testing.expectEqualStrings("https://idp/a?login_hint=" ++ enc ++ "&x=1" ++ "#frag", got2);
     // Fragment-only URI gets a query before the fragment.
     const got3 = try df.appendLoginHint(alloc, "https://idp/a#frag", "user@example.com");
     defer alloc.free(got3);
@@ -196,6 +196,21 @@ test "login hint mutates query replacing existing key and keeping fragment" {
     const got6 = try df.appendLoginHint(alloc, "https://idp/a?x=1#frag", "");
     defer alloc.free(got6);
     try std.testing.expectEqualStrings("https://idp/a?x=1#frag", got6);
+}
+
+test "login hint replaces percent decoded query key" {
+    const got = try df.appendLoginHint(alloc, "https://example.test/verify?login%5Fhint=old#frag", "new");
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings("https://example.test/verify?login_hint=new#frag", got);
+}
+
+test "login hint preserves empty query key with Go query encoding" {
+    const got = try df.appendLoginHint(alloc, "https://example.test/verify?=keep", "new");
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings("https://example.test/verify?=keep&login_hint=new", got);
+    const normalized = try df.appendLoginHint(alloc, "https://example.test/verify?z=%2f&=a+b&z=second&bare&bad=%GG&semi=x;y&&login%5fhint=old", "new");
+    defer alloc.free(normalized);
+    try std.testing.expectEqualStrings("https://example.test/verify?=a+b&bare=&login_hint=new&z=%2F&z=second", normalized);
 }
 
 // ---------------------------------------------------------------------------

@@ -174,74 +174,102 @@ pub fn validateDeviceAuthConfig(cfg: *const DeviceAuthProviderConfig) Error!void
     return;
 }
 
-/// Append or replace the login_hint query parameter (appendLoginHint).
-/// Mutates the URI query like Go url.Parse + Query().Set + Encode upstream:
-/// other parameters are kept, a prior login_hint is replaced and duplicates
-/// collapse into one (Set semantics), the fragment is preserved, values are
-/// percent-encoded like Go's url.Values.Encode (space as '+'). Unlike Go's
-/// Encode, kept pairs are not re-encoded or re-sorted; pair order is not
-/// semantically significant. A URI Go cannot parse (control characters) is
-/// returned unchanged. Returns owned string; empty uri/hint returns a dupe
-/// of uri.
+/// Replace login_hint using Go Query().Set + Values.Encode semantics.
+/// Query keys and values are decoded, invalid pairs discarded, and keys sorted.
+/// Returns an owned string, preserving the fragment and empty hint behavior.
 pub fn appendLoginHint(
     alloc: std.mem.Allocator,
     uri: []const u8,
     login_hint: []const u8,
 ) Error![]u8 {
-    if (uri.len == 0 or login_hint.len == 0) {
+    if (uri.len == 0 or login_hint.len == 0)
         return alloc.dupe(u8, uri) catch Error.OutOfMemory;
-    }
     for (uri) |c| {
         if (c < 0x20 or c == 0x7f) return alloc.dupe(u8, uri) catch Error.OutOfMemory;
     }
-    const enc_hint = formEncode(alloc, login_hint) catch return Error.OutOfMemory;
-    defer alloc.free(enc_hint);
-
-    // Fragment starts at the first '#'; the query lives before it.
+    const Pair = struct { key: []u8, value: []u8 };
+    var pairs: std.ArrayList(Pair) = .empty;
+    defer {
+        for (pairs.items) |pair| {
+            alloc.free(pair.key);
+            alloc.free(pair.value);
+        }
+        pairs.deinit(alloc);
+    }
     const base_end = std.mem.indexOfScalar(u8, uri, '#') orelse uri.len;
     const base = uri[0..base_end];
-    const frag = uri[base_end..];
-
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(alloc);
-    if (std.mem.indexOfScalar(u8, base, '?')) |q| {
-        try out.appendSlice(alloc, base[0..q]);
-        try out.append(alloc, '?');
-        // Rebuild the query: keep every pair with a non-empty key as-is
-        // (Go parseQuery drops empty keys), replace the first login_hint
-        // and drop further ones.
-        var first = true;
-        var wrote_hint = false;
+    const q = std.mem.indexOfScalar(u8, base, '?') orelse base.len;
+    if (q < base.len) {
         var it = std.mem.splitScalar(u8, base[q + 1 ..], '&');
         while (it.next()) |pair| {
-            const key = pair[0 .. std.mem.indexOfScalar(u8, pair, '=') orelse pair.len];
-            if (key.len == 0) continue;
-            if (std.mem.eql(u8, key, "login_hint")) {
-                if (wrote_hint) continue;
-                wrote_hint = true;
-                if (!first) try out.append(alloc, '&');
-                first = false;
-                try out.appendSlice(alloc, "login_hint=");
-                try out.appendSlice(alloc, enc_hint);
-            } else {
-                if (!first) try out.append(alloc, '&');
-                first = false;
-                try out.appendSlice(alloc, pair);
+            if (pair.len == 0 or std.mem.indexOfScalar(u8, pair, ';') != null) continue;
+            const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
+            const key = (try formDecode(alloc, pair[0..eq])) orelse continue;
+            const value = formDecode(alloc, if (eq < pair.len) pair[eq + 1 ..] else "") catch |err| {
+                alloc.free(key);
+                return err;
+            };
+            if (value == null or std.mem.eql(u8, key, "login_hint")) {
+                alloc.free(key);
+                if (value) |v| alloc.free(v);
+                continue;
             }
+            pairs.append(alloc, .{ .key = key, .value = value.? }) catch {
+                alloc.free(key);
+                alloc.free(value.?);
+                return Error.OutOfMemory;
+            };
         }
-        if (!wrote_hint) {
-            if (!first) try out.append(alloc, '&');
-            try out.appendSlice(alloc, "login_hint=");
-            try out.appendSlice(alloc, enc_hint);
-        }
-    } else {
-        try out.appendSlice(alloc, base);
-        try out.append(alloc, '?');
-        try out.appendSlice(alloc, "login_hint=");
-        try out.appendSlice(alloc, enc_hint);
     }
-    try out.appendSlice(alloc, frag);
+    const hint_key = try alloc.dupe(u8, "login_hint");
+    const hint_value = alloc.dupe(u8, login_hint) catch {
+        alloc.free(hint_key);
+        return Error.OutOfMemory;
+    };
+    pairs.append(alloc, .{ .key = hint_key, .value = hint_value }) catch {
+        alloc.free(hint_key);
+        alloc.free(hint_value);
+        return Error.OutOfMemory;
+    };
+    // Stable sorting preserves the input order of repeated values for a key.
+    std.mem.sort(Pair, pairs.items, {}, struct {
+        fn less(_: void, a: Pair, b: Pair) bool {
+            return std.mem.order(u8, a.key, b.key) == .lt;
+        }
+    }.less);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try out.appendSlice(alloc, base[0..q]);
+    try out.append(alloc, '?');
+    for (pairs.items, 0..) |pair, i| {
+        const key = try formEncode(alloc, pair.key);
+        defer alloc.free(key);
+        const value = try formEncode(alloc, pair.value);
+        defer alloc.free(value);
+        if (i != 0) try out.append(alloc, '&');
+        try out.appendSlice(alloc, key);
+        try out.append(alloc, '=');
+        try out.appendSlice(alloc, value);
+    }
+    try out.appendSlice(alloc, uri[base_end..]);
     return out.toOwnedSlice(alloc);
+}
+
+/// Go QueryUnescape: '+' is space and malformed percent escapes reject a pair.
+fn formDecode(alloc: std.mem.Allocator, s: []const u8) Error!?[]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] == '%') {
+            if (s.len - i < 3) return null;
+            const hi = std.fmt.charToDigit(s[i + 1], 16) catch return null;
+            const lo = std.fmt.charToDigit(s[i + 2], 16) catch return null;
+            try out.append(alloc, hi * 16 + lo);
+            i += 2;
+        } else try out.append(alloc, if (s[i] == '+') ' ' else s[i]);
+    }
+    return try out.toOwnedSlice(alloc);
 }
 
 /// Percent-encode a form value (application/x-www-form-urlencoded:
