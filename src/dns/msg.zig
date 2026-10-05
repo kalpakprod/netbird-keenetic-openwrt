@@ -163,7 +163,7 @@ pub fn unpack(alloc: std.mem.Allocator, msg: []const u8) Error!Message {
     var m = Message{};
     m.header = unpackHeader(msg[0..header_len]);
     // miekg accepts header-only responses even with nonzero section counts.
-    if (msg.len == header_len and m.header.response) return m;
+    if (msg.len == header_len) return m;
     const qd = std.mem.readInt(u16, msg[4..6], .big);
     const an = std.mem.readInt(u16, msg[6..8], .big);
     const ns = std.mem.readInt(u16, msg[8..10], .big);
