@@ -275,7 +275,14 @@ pub fn recvMessage(c: *Call) Error!?[]const u8 {
                     try c.conn.sendWindowUpdate(c.stream_id, @intCast(d.bytes.len));
                     try c.conn.sendWindowUpdate(0, @intCast(d.bytes.len));
                 }
-                if (d.end_stream) return Error.GrpcStatusMissing;
+                if (d.end_stream) {
+                    // grpc-go handleData: END_STREAM without trailers is Internal.
+                    c.status_code = 13;
+                    try c.status_msg.appendSlice(c.alloc, "server closed the stream without sending trailers");
+                    c.done = true;
+                    if (try c.popMessage()) |msg| return msg;
+                    return null;
+                }
             },
             .trailers => |t| {
                 try c.handleTrailers(t.stream_id, t.fields);

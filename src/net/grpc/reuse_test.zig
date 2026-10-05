@@ -149,5 +149,7 @@ test "DATA END_STREAM requires trailers" {
     var call = try grpc.startCall(&conn, std.testing.allocator, "/svc/Empty", "localhost", null, std.testing.io);
     defer call.deinit();
     try grpc.closeSend(&call);
-    try std.testing.expectError(error.GrpcStatusMissing, grpc.recvMessage(&call));
+    try std.testing.expect(try grpc.recvMessage(&call) == null);
+    try std.testing.expectEqual(@as(?u32, 13), call.status());
+    try std.testing.expectEqualStrings("server closed the stream without sending trailers", call.statusMessage());
 }
