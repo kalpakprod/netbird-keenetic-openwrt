@@ -261,7 +261,7 @@ pub fn recvMessage(c: *Call) Error!?[]const u8 {
     if (c.done) return null;
     while (true) {
         if (try c.popMessage()) |msg| return msg;
-        const ev = try c.conn.readNext() orelse return Error.GrpcTruncated;
+        const ev = try c.conn.readNext() orelse continue;
         switch (ev) {
             .response_headers => |h| {
                 try c.handleHeaders(h.stream_id, h.end_stream, h.fields);
@@ -292,7 +292,7 @@ pub fn recvMessage(c: *Call) Error!?[]const u8 {
 /// responseHeader() is valid) or the call ends terminally first.
 pub fn awaitHeaders(c: *Call) Error!void {
     while (!c.headers_seen and !c.done) {
-        const ev = try c.conn.readNext() orelse return Error.GrpcTruncated;
+        const ev = try c.conn.readNext() orelse continue;
         switch (ev) {
             .response_headers => |h| try c.handleHeaders(h.stream_id, h.end_stream, h.fields),
             .trailers => |t| try c.handleTrailers(t.stream_id, t.fields),
