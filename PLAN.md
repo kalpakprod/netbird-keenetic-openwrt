@@ -46,7 +46,7 @@ Cross-family rule: a PR by Sol low is reviewed by Sol max, then by the lead (a d
 PRs by Muse/GLM already carry a Sol review, so the lead checks the evidence and merges.
 
 State on 2026-10-06 (`origin/main` after #61 and #68): ICE stack (STUN, ICE, TURN) is on main; WireGuard noise/device/timers/cookie and TUN were
-already on main, so #3 and #37 were closed as identical. The bulk of the client (TLS ALPN, H2 conn, gRPC, mgmt, signal, cli, engine, app)
+already on main, so #3 and #37 were closed as identical. The bulk of the client (H2 conn, gRPC, mgmt, signal, cli, engine, app; TLS with ALPN is already on main)
 still sits in the `feat/h2-conn` stack (PR #23) and is not on main. Sol reviews S01-S11 found defects in TLS/H2 adapter, WG source ownership and replay,
 DNS, protogen, device flow, service adapter and relay client; each defect becomes its own fix PR.
 
