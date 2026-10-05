@@ -30,7 +30,11 @@ pub const proto_udp: u8 = 17;
 pub const min_channel: u16 = 0x4000;
 pub const max_channel: u16 = 0x7FFF;
 pub const channel_header_len = 4;
-pub const max_channels = 16;
+/// Binding table capacity = the whole RFC 5766 channel number space
+/// (0x4000..0x7FFF, 16384 values); pion's client (binding.go bindingManager)
+/// is bounded by the same space. Successful binds can never exceed it, so
+/// the fixed table cannot overflow; slots cost memory only once bound.
+pub const max_channels = max_channel - min_channel + 1;
 pub const max_permissions = 32;
 
 /// Port of proto.IsChannelData: 4+ bytes, length sane, number in range.
@@ -445,8 +449,11 @@ pub fn createPermission(c: *Client, peer: IpAddress) Error!void {
 /// UDPConn.WriteTo path). Returns the channel number.
 pub fn channelBind(c: *Client, peer: IpAddress) Error!u16 {
     if (c.channelFor(peer)) |existing| return existing;
+    // Capacity before any server transaction: exhausting the table or the
+    // number space fails cleanly and leaves bindings/permissions untouched.
+    if (c.n_channels >= c.channels.len or c.next_channel > max_channel)
+        return Error.BadChannel;
     try createPermission(c, peer);
-    if (c.next_channel > max_channel) return Error.BadChannel;
     const number = c.next_channel;
     c.next_channel += 1;
 
