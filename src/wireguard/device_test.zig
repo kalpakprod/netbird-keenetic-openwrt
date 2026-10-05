@@ -365,3 +365,144 @@ test "initiation propagates index allocation failure" {
     try std.testing.expect(failing.has_induced_failure);
     try std.testing.expectEqual(@as(u32, 0), d.index_table.count());
 }
+
+// Install deterministic transport sessions so these tests exercise the real
+// authenticated receive path without coupling source ownership to handshakes.
+fn sourcePeer(d: *device.Device, byte: u8, index: u32) !*device.Peer {
+    const p = try d.addPeer(noise.publicKeyFromPrivate(clampedKey(byte)), psk_zero);
+    const kp = try std.testing.allocator.create(device.Keypair);
+    kp.* = .{
+        .transport = .{ .send_key = @splat(byte), .receive_key = @splat(byte), .remote_index = index },
+        .is_initiator = true, .created_ns = T0, .local_index = index, .remote_index = index,
+    };
+    p.current = kp;
+    try d.index_table.put(index, .{ .peer = p, .keypair = kp });
+    return p;
+}
+
+const SourceSink = struct {
+    count: usize = 0,
+    last: ?*device.Peer = null,
+    fn receive(ctx: ?*anyopaque, peer: *device.Peer, packet: []const u8) void {
+        const s: *SourceSink = @ptrCast(@alignCast(ctx));
+        _ = packet;
+        s.count += 1;
+        s.last = peer;
+    }
+};
+
+fn checkSource(d: *device.Device, p: *device.Peer, sink: *SourceSink, accepted: bool) !void {
+    var plain: [64]u8 = undefined;
+    const packet = ip4Packet(.{10, 0, 0, 7}, .{10, 0, 0, 99}, "ownership", &plain);
+    var wire: [128]u8 = undefined;
+    const kp = p.current.?;
+    var sender = noise.Transport{ .send_key = kp.transport.receive_key, .receive_key = kp.transport.send_key,
+        .remote_index = kp.local_index, .send_nonce = kp.transport.send_nonce };
+    _ = try sender.seal(wire[0..16], wire[16..][0 .. packet.len + noise.tag_size], packet);
+    kp.transport.send_nonce = sender.send_nonce;
+    const before = sink.count;
+    d.receiveDatagram(wire[0 .. 16 + packet.len + noise.tag_size], device.Endpoint.v4(127, 0, 0, 1, 9000), T0);
+    try std.testing.expectEqual(before + @as(usize, if (accepted) 1 else 0), sink.count);
+    if (accepted) try std.testing.expectEqual(p, sink.last.?);
+}
+
+test "source ownership uses device-wide longest prefix" {
+    var d = device.Device.init(std.testing.allocator, std.testing.io, clampedKey(0xD4), .{});
+    defer d.deinit();
+    var sink: SourceSink = .{};
+    d.sink_ctx = &sink;
+    d.packet_sink = SourceSink.receive;
+    const a = try sourcePeer(&d, 0xA1, 101);
+    const b = try sourcePeer(&d, 0xB2, 102);
+    try a.allowed.append(std.testing.allocator, device.Cidr.parseV4("10.0.0.0/24").?);
+    try b.allowed.append(std.testing.allocator, device.Cidr.parseV4("10.0.0.7/32").?);
+    try checkSource(&d, a, &sink, false);
+    try checkSource(&d, b, &sink, true);
+}
+
+test "equal prefix ownership follows assignment not creation order" {
+    for ([_]bool{false, true}) |reverse| {
+        var d = device.Device.init(std.testing.allocator, std.testing.io, clampedKey(0xD4), .{});
+        defer d.deinit();
+        var sink: SourceSink = .{};
+        d.sink_ctx = &sink;
+        d.packet_sink = SourceSink.receive;
+        const a = try sourcePeer(&d, 0xA1, 101);
+        const b = try sourcePeer(&d, 0xB2, 102);
+        const first = if (reverse) a else b;
+        const last = if (reverse) b else a;
+        try first.allowed.append(std.testing.allocator, device.Cidr.parseV4("10.0.0.0/24").?);
+        // Host bits do not distinguish exact prefixes in the upstream trie.
+        try last.allowed.append(std.testing.allocator, device.Cidr.fromBytes(device.Endpoint.v4(10, 0, 0, 123, 0).ip, 120).?);
+        try checkSource(&d, first, &sink, false);
+        try checkSource(&d, last, &sink, true);
+        first.allowed.clearRetainingCapacity(); // must not remove the new owner
+        try checkSource(&d, last, &sink, true);
+        last.allowed.clearRetainingCapacity();
+        try checkSource(&d, last, &sink, false);
+        try checkSource(&d, first, &sink, false); // stolen entry must not reappear
+        try first.allowed.append(std.testing.allocator, device.Cidr.parseV4("10.0.0.0/24").?);
+        try checkSource(&d, first, &sink, true);
+        try checkSource(&d, last, &sink, false);
+    }
+}
+
+fn allocationCidr(last: u8, second: u8) device.Cidr {
+    return device.Cidr.fromBytes(device.Endpoint.v4(10, second, 0, last, 0).ip, 128).?;
+}
+
+test "first allocation failure preserves old owner and recovery" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    const allocator = failing.allocator();
+    var d = device.Device.init(allocator, std.testing.io, clampedKey(0xD4), .{});
+    defer d.deinit();
+    var sink: SourceSink = .{};
+    d.sink_ctx = &sink;
+    d.packet_sink = SourceSink.receive;
+    const a = try sourcePeer(&d, 0xA1, 101);
+    const b = try sourcePeer(&d, 0xB2, 102);
+    const wide = device.Cidr.parseV4("10.0.0.0/24").?;
+    try a.allowed.append(allocator, wide);
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, b.allowed.append(allocator, wide));
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 1), a.allowed.items.len);
+    try std.testing.expectEqual(@as(usize, 0), b.allowed.items.len);
+    try std.testing.expectEqual(@as(usize, 1), d.allowed_ips.items.len);
+    failing.fail_index = std.math.maxInt(usize);
+    try checkSource(&d, a, &sink, true);
+    try checkSource(&d, b, &sink, false);
+    try b.allowed.append(allocator, wide);
+    try checkSource(&d, a, &sink, false);
+    try checkSource(&d, b, &sink, true);
+}
+
+test "second reserve failure preserves allowed list view" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    const allocator = failing.allocator();
+    var d = device.Device.init(allocator, std.testing.io, clampedKey(0xD4), .{});
+    defer d.deinit();
+    const a = try d.addPeer(noise.publicKeyFromPrivate(clampedKey(0xA1)), psk_zero);
+    const b = try d.addPeer(noise.publicKeyFromPrivate(clampedKey(0xB2)), psk_zero);
+    try a.allowed.append(allocator, allocationCidr(1, 1));
+    var last: u8 = 2;
+    while (a.allowed.list.items.len < a.allowed.list.capacity) : (last += 1) {
+        try a.allowed.append(allocator, allocationCidr(last, 1));
+    }
+    last = 1;
+    while (d.allowed_ips.items.len < d.allowed_ips.capacity) : (last += 1) {
+        try b.allowed.append(allocator, allocationCidr(last, 2));
+    }
+    const before_a = a.allowed.items.len;
+    const before_table = d.allowed_ips.items.len;
+    failing.fail_index = failing.alloc_index + 1; // Peer reserve succeeds, device-table reserve fails.
+    try std.testing.expectError(error.OutOfMemory, a.allowed.append(allocator, allocationCidr(200, 1)));
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(before_a, a.allowed.items.len);
+    try std.testing.expectEqual(before_a, a.allowed.list.items.len);
+    try std.testing.expectEqual(before_table, d.allowed_ips.items.len);
+    const synchronized = @intFromPtr(a.allowed.items.ptr) == @intFromPtr(a.allowed.list.items.ptr);
+    std.debug.print("REVIEW_OOM peer_len={d} table_len={d} public_view_synchronized={}\n", .{ before_a, before_table, synchronized });
+    // This assertion never dereferences the old pointer.
+    try std.testing.expect(synchronized);
+}
