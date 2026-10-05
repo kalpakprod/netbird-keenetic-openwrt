@@ -55,6 +55,8 @@ pub const Error = error{
     BindFailed,
     GetSockNameFailed,
     PollFailed,
+    TunClosed,
+    UdpError,
     RecvFailed,
     NotRunning,
     AlreadyRunning,
@@ -160,6 +162,12 @@ pub const Runtime = struct {
     udp_buf: []u8 = &.{},
     tun_buf: []u8 = &.{},
     running: bool = false,
+    /// Sticky callback diagnostics, reset on a new start. UDP errors drop the
+    /// datagram (Device timers may retry); TUN errors are visible to the owner.
+    udp_send_failures: usize = 0,
+    last_udp_errno: ?usize = null,
+    tun_write_failures: usize = 0,
+    last_tun_error: ?Error = null,
 
     /// Prepare an adapter for `dev`. Call start() to open the resources.
     /// While started, the value must stay at its address: the Device
@@ -177,6 +185,10 @@ pub const Runtime = struct {
     pub fn start(r: *Runtime) Error!void {
         if (r.running) return Error.AlreadyRunning;
         errdefer r.stop();
+        r.udp_send_failures = 0;
+        r.last_udp_errno = null;
+        r.tun_write_failures = 0;
+        r.last_tun_error = null;
 
         const fd_usize = linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
         if (fd_usize > max_errno_usize) return Error.SocketFailed;
@@ -230,6 +242,18 @@ pub const Runtime = struct {
         }
         if (fds[0].revents & linux.POLL.NVAL != 0 or
             (n_fds == 2 and fds[1].revents & linux.POLL.NVAL != 0)) return Error.PollFailed;
+        if (n_fds == 2 and fds[1].revents & (linux.POLL.ERR | linux.POLL.HUP) != 0)
+            return Error.TunClosed;
+        // Consume pending UDP errors with SO_ERROR, then return a terminal
+        // error even for HUP/ERR with SO_ERROR=0. The owner must stop/restart,
+        // never repeatedly treat error-only readiness as a successful tick.
+        if (fds[0].revents & (linux.POLL.ERR | linux.POLL.HUP) != 0) {
+            var socket_error: i32 = 0;
+            var len: linux.socklen_t = @sizeOf(i32);
+            _ = linux.getsockopt(r.sock_fd, linux.SOL.SOCKET, linux.SO.ERROR,
+                @ptrCast(&socket_error), &len);
+            return Error.UdpError;
+        }
         if (fds[0].revents & linux.POLL.IN != 0) try r.drainUdp();
         if (n_fds == 2 and fds[1].revents & linux.POLL.IN != 0) try r.readTun();
         r.dev.pollAll(r.nowNs());
@@ -331,11 +355,11 @@ pub const Runtime = struct {
 
     /// Device -> real UDP. The Device API returns void, so a failed sendto
     /// (ENOBUFS, route lost) drops the datagram, like wireguard-go's send
-    /// path; start/poll/stop errors are the ones that propagate.
+    /// path. Failures remain observable in udp_send_failures/last_udp_errno.
     fn udpSend(ctx: ?*anyopaque, datagram: []const u8, to: device.Endpoint) void {
         const r: *Runtime = @ptrCast(@alignCast(ctx.?));
         var sa = sockaddrFromEndpoint(to) orelse return; // non-v4 endpoint on v4 socket
-        _ = linux.sendto(
+        const sent = linux.sendto(
             r.sock_fd,
             datagram.ptr,
             datagram.len,
@@ -343,14 +367,22 @@ pub const Runtime = struct {
             @ptrCast(&sa),
             @sizeOf(linux.sockaddr.in),
         );
+        if (sent > max_errno_usize) {
+            r.udp_send_failures +|= 1;
+            r.last_udp_errno = syscallErrno(sent);
+        }
     }
 
-    /// Device -> real TUN. Same drop-on-error note as udpSend.
+    /// Device -> real TUN. Callback signature is void, so record errors in
+    /// tun_write_failures/last_tun_error for the runtime owner.
     fn tunSink(ctx: ?*anyopaque, peer: *device.Peer, packet: []const u8) void {
         _ = peer;
         const r: *Runtime = @ptrCast(@alignCast(ctx.?));
         const t: *TunDevice = &r.tun.?;
-        t.write(packet) catch {};
+        t.write(packet) catch |err| {
+            r.tun_write_failures +|= 1;
+            r.last_tun_error = err;
+        };
     }
 };
 
