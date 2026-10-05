@@ -35,6 +35,42 @@ fn cleanup(root: []const u8) void {
     std.Io.Dir.cwd().deleteTree(tio, root) catch {};
 }
 
+test "all page APIs validate SQLite geometry" {
+    const alloc = std.testing.allocator;
+    const root = try scratchRoot(alloc);
+    defer alloc.free(root);
+    defer cleanup(root);
+    const path = try std.fmt.allocPrint(alloc, "{s}/geometry.db", .{root});
+    defer alloc.free(path);
+    var db = try file.DbFile.createAbsolute(tio, path, true);
+    defer db.close();
+    for ([_]u32{ 1000, 0, 256, 131072 }) |ps| {
+        const page = try alloc.alloc(u8, ps);
+        defer alloc.free(page);
+        @memset(page, 0);
+        try db.truncate(ps);
+        try std.testing.expectError(file.Error.InvalidPageSize, db.pageCount(ps));
+        try std.testing.expectError(file.Error.InvalidPageSize, db.readPage(1, ps, page));
+        try std.testing.expectError(file.Error.InvalidPageSize, db.writePage(1, ps, page));
+        try std.testing.expectError(file.Error.InvalidPageSize, file.pageOffset(1, ps));
+        try std.testing.expectError(file.Error.InvalidPageSize, file.createEmpty(tio, alloc, path, ps, 1, .utf8));
+    }
+    for ([_]u32{ 512, 65536 }) |ps| {
+        try file.createEmpty(tio, alloc, path, ps, 1, .utf8);
+        try std.testing.expectEqual(@as(u32, 1), try db.pageCount(ps));
+        const page = try alloc.alloc(u8, ps);
+        defer alloc.free(page);
+        try db.readPage(1, ps, page);
+        page[100] = 0xa5;
+        try db.writePage(1, ps, page);
+        @memset(page, 0);
+        try db.readPage(1, ps, page);
+        try std.testing.expectEqual(@as(u8, 0xa5), page[100]);
+        try std.testing.expectEqual(@as(u64, ps), try file.pageOffset(2, ps));
+        try std.testing.expectEqual(ps, try (try db.readHeader()).pageSize());
+    }
+}
+
 test "header parses real Go-created database" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     const alloc = std.testing.allocator;
