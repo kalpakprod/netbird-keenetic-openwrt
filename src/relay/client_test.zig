@@ -47,6 +47,7 @@ const FakeConn = struct {
     written: std.ArrayListUnmanaged(u8) = .empty,
     // ws.Conn surface bits the client calls
     destroyed: bool = false,
+    fail_read: bool = false,
 
     fn initInPlace(c: *FakeConn, gpa: std.mem.Allocator, server_frames: []const u8) void {
         c.* = .{ .gpa = gpa, .server_stream = undefined };
@@ -67,6 +68,7 @@ const FakeConn = struct {
     }
 
     pub fn readMessage(c: *FakeConn, out: []u8) !struct { data: []const u8 } {
+        if (c.fail_read) return error.ReadFailed;
         // decode one frame from server_stream
         const hdr = try c.server_stream.takeArray(2);
         const fin = hdr[0] & 0x80 != 0;
@@ -251,4 +253,37 @@ test "client: explicit close sends relay close and is idempotent" {
     try testing.expectEqualSlices(u8, &msgs.marshalCloseMsg(), fake.written.items);
     var out: [16]u8 = undefined;
     try testing.expectError(error.Closed, c.recv(&out));
+}
+
+test "client: unexpected and malformed auth responses destroy owned transport" {
+    const inputs = [_][]const u8{ &msgs.marshalHealthcheck(), &.{ 1, 7 } };
+    const errors = [_]anyerror{ error.UnexpectedMessage, error.InvalidMessageLength };
+    for (inputs, errors) |input, expected| {
+        var frame: [9000]u8 = undefined;
+        var fake: FakeConn = undefined;
+        fake.initInPlace(testing.allocator, serverFrame(&frame, true, Opcode.binary, input));
+        defer fake.deinit();
+        try testing.expectError(expected, FakeClient.connect(testing.allocator, &fake, .{ .peer_id = "a", .token = "" }));
+        try testing.expect(fake.destroyed);
+    }
+}
+
+test "client: relay close and read failure terminate subscribed waits" {
+    for ([_]bool{ true, false }) |relay_close| {
+        var frame: [9000]u8 = undefined;
+        var bytes: [9000]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&bytes);
+        _ = try writer.write(authResponseFrame(&frame, "rel://localhost:1"));
+        if (relay_close) _ = try writer.write(serverFrame(&frame, true, Opcode.binary, &msgs.marshalCloseMsg()));
+        var fake: FakeConn = undefined;
+        fake.initInPlace(testing.allocator, writer.buffered());
+        defer fake.deinit();
+        const c = try FakeClient.connect(testing.allocator, &fake, .{ .peer_id = "a", .token = "" });
+        defer c.destroy();
+        try c.subscribe(msgs.hashID("b"));
+        fake.fail_read = !relay_close;
+        try testing.expectError(if (relay_close) error.Closed else error.ReadFailed, c.waitPeerOnline(msgs.hashID("b")));
+        var out: [8]u8 = undefined;
+        try testing.expectError(error.Closed, c.recv(&out));
+    }
 }
