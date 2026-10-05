@@ -34,6 +34,7 @@ fn getenv(allocator: std.mem.Allocator, key: []const u8) !?[]u8 {
 
 const Live = struct {
     stream: std.Io.net.Stream,
+    transport_open: bool = true,
     rdr: std.Io.net.Stream.Reader,
     wtr: std.Io.net.Stream.Writer,
     rx_buf: [16384]u8,
@@ -68,6 +69,7 @@ const Live = struct {
         const stream = try addr.connect(tio, .{ .mode = .stream });
         errdefer stream.close(tio);
         self.stream = stream;
+        self.transport_open = true;
         self.authority = addr_str;
         self.rdr = std.Io.net.Stream.Reader.init(stream, tio, &self.rx_buf);
         self.wtr = stream.writer(tio, &self.tx_buf);
@@ -78,7 +80,7 @@ const Live = struct {
     }
 
     fn close(self: *Live, allocator: std.mem.Allocator) void {
-        self.stream.close(tio);
+        if (self.transport_open) self.stream.close(tio);
         allocator.free(self.authority);
         allocator.destroy(self);
     }
@@ -97,6 +99,55 @@ fn exchange(sender: *signal.Client, receiver: *signal.Stream, from: []const u8, 
     const actual = try got.body.encode(std.testing.allocator);
     defer std.testing.allocator.free(actual);
     try std.testing.expectEqualSlices(u8, expected, actual);
+}
+
+fn activePeers(port: u16) !u64 {
+    var address: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
+    const stream = try address.connect(tio, .{ .mode = .stream });
+    defer stream.close(tio);
+    var tx: [256]u8 = undefined;
+    var writer = stream.writer(tio, &tx);
+    try writer.interface.writeAll("GET /metrics HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    try writer.interface.flush();
+    var rx: [4096]u8 = undefined;
+    var reader = stream.reader(tio, &rx);
+    var data: std.ArrayList(u8) = .empty;
+    defer data.deinit(std.testing.allocator);
+    var chunk: [4096]u8 = undefined;
+    while (true) {
+        const n = try reader.interface.readSliceShort(&chunk);
+        try data.appendSlice(std.testing.allocator, chunk[0..n]);
+        if (n < chunk.len) break;
+    }
+    if (!std.mem.startsWith(u8, data.items, "HTTP/1.0 200") and
+        !std.mem.startsWith(u8, data.items, "HTTP/1.1 200")) return error.MetricsHttpFailed;
+    var lines = std.mem.splitScalar(u8, data.items, '\n');
+    var count: u64 = 0;
+    var found = false;
+    while (lines.next()) |line| {
+        if (line.len == 0 or line[0] == '#') continue;
+        const end = std.mem.indexOfScalar(u8, line, ' ') orelse continue;
+        const metric = line[0..end];
+        if (!std.mem.startsWith(u8, metric, "active_peers") and
+            !std.mem.startsWith(u8, metric, "netbird_signal_active_peers")) continue;
+        var values = std.mem.tokenizeAny(u8, line[end..], " \r\t");
+        count += try std.fmt.parseInt(u64, values.next() orelse return error.MissingMetricValue, 10);
+        found = true;
+    }
+    if (!found) return error.ActivePeersMetricMissing;
+    return count;
+}
+
+fn waitActivePeers(port: u16, expected: u64) !void {
+    for (0..40) |_| {
+        const count = try activePeers(port);
+        if (count == expected) {
+            std.debug.print("SERVER_ACTIVE_PEERS={d}\n", .{count});
+            return;
+        }
+        try std.Io.sleep(tio, .fromMilliseconds(50), .awake);
+    }
+    return error.ServerDidNotObserveClose;
 }
 
 test "signal Go v0.80 boxed bidirectional exchange and stream isolation" {
@@ -140,9 +191,23 @@ test "signal Go v0.80 boxed bidirectional exchange and stream isolation" {
     try b.send(&.{ .remote_key = unknown, .body = .{ .msg_type = .candidate, .payload = "unknown" } });
     try std.testing.expectEqual(@as(u32, 0), b.last_status_code);
     std.debug.print("stage close A stream, retain B stream\n", .{});
+    // Buffer deinit is not cancellation. Close the owned socket and wait for
+    // the server's active-peer gauge to fall before exercising B again.
+    const metrics_addr = (try getenv(alloc, "STACK_SIGNAL_METRICS_PORT")) orelse return error.MetricsPortRequired;
+    defer alloc.free(metrics_addr);
+    const metrics_port = try std.fmt.parseInt(u16, metrics_addr, 10);
+    try waitActivePeers(metrics_port, 2);
+    la.stream.close(tio);
+    la.transport_open = false;
     sa.deinit();
     a_open = false;
-    // A's unary RPC still delivers to B after A's receiving stream closes.
-    try exchange(&a, &sb, ap, bp, .{ .msg_type = .candidate, .payload = "after-close" });
+    try waitActivePeers(metrics_port, 1);
+    // A's transport is gone. Use a separate unary connection with the same
+    // ephemeral identity, without creating a new receiving stream.
+    const lc = try Live.connect(alloc, port);
+    defer lc.close(alloc);
+    var sender = signal.Client{ .conn = &lc.conn, .alloc = alloc, .authority = addr, .io = tio, .key = a.key };
+    defer sender.deinit();
+    try exchange(&sender, &sb, ap, bp, .{ .msg_type = .candidate, .payload = "after-close" });
     std.debug.print("interop complete: boxed bodies match and B survives A close\n", .{});
 }
