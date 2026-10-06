@@ -280,6 +280,21 @@ pub const Conn = struct {
         return null;
     }
 
+    /// Release local capacity without sending a frame. Closed or unknown ids are no-ops.
+    pub fn releaseStream(c: *Conn, id: u32) void {
+        const sm = c.findStream(id) orelse return;
+        sm.state = .closed;
+    }
+
+    /// Release locally even when the peer does not echo RST_STREAM.
+    pub fn resetStream(c: *Conn, id: u32, code: frame.ErrCode) Error!void {
+        const sm = c.findStream(id) orelse return Error.StreamClosed;
+        sm.state = .closed;
+        var w = frame.Writer.init(&c.write_buf);
+        try w.writeRstStream(id, code);
+        try c.transport.writeAll(w.bytes());
+    }
+
     /// Local END_STREAM sent: open -> half_closed_local, remote already
     /// done -> closed (RFC 7540 5.1).
     fn localEnd(sm: *Stream) void {
@@ -406,7 +421,8 @@ pub const Conn = struct {
                 .headers => |hd| try c.onHeaders(hd, h.stream_id),
                 .continuation => |cc| try c.onContinuation(cc, h.stream_id),
                 .rst_stream => |r| blk: {
-                    if (c.findStream(h.stream_id)) |sm| sm.state = .closed;
+                    const sm = c.findStream(h.stream_id) orelse break :blk null;
+                    sm.state = .closed;
                     break :blk Event{ .rst = .{ .stream_id = h.stream_id, .code = r.err_code } };
                 },
                 .goaway => |g| blk: {
@@ -457,7 +473,13 @@ pub const Conn = struct {
     }
 
     fn onData(c: *Conn, d: frame.Data) Error!?Event {
-        const sm = c.findStream(d.header.stream_id) orelse return Error.StreamClosed;
+        const sm = c.findStream(d.header.stream_id) orelse {
+            if (d.header.stream_id >= c.next_stream_id) return Error.StreamClosed;
+            if (d.header.length > c.conn_recv_window) return Error.FlowControl;
+            c.conn_recv_window -= d.header.length;
+            if (d.header.length > 0) try c.sendWindowUpdate(0, d.header.length);
+            return null;
+        };
         if (sm.state == .half_closed_remote) return Error.StreamClosed;
         // Flow control counts the whole payload incl. padding (RFC 7540
         // 6.9, Go transport.go:2328 takeInflows(f.Length)).
@@ -490,7 +512,7 @@ pub const Conn = struct {
     fn onHeaders(c: *Conn, hd: frame.Headers, stream_id: u32) Error!?Event {
         // Response HEADERS on a stream we never opened (or push, which we
         // disabled) is a connection error.
-        if (c.findStream(stream_id) == null) return Error.Protocol;
+        if (c.findStream(stream_id) == null and stream_id >= c.next_stream_id) return Error.Protocol;
         if (hd.headersEnded()) {
             return c.decodeBlock(stream_id, hd.fragment, hd.streamEnded());
         }
@@ -514,7 +536,9 @@ pub const Conn = struct {
     }
 
     fn decodeBlock(c: *Conn, stream_id: u32, block: []const u8, end_stream: bool) Error!?Event {
-        const sm = c.findStream(stream_id) orelse return Error.StreamClosed;
+        var discarded: Stream = .{};
+        const active = c.findStream(stream_id);
+        const sm = active orelse &discarded;
         const is_trailers = sm.headers_received;
         sm.headers_received = true;
         const Ctx = struct {
@@ -540,6 +564,7 @@ pub const Conn = struct {
                 else => err,
             };
         };
+        if (active == null) return null;
         if (ctx.dropped) return Error.MessageTooLong;
         if (end_stream) remoteEnd(sm);
         const fields = c.fields_buf[0..ctx.len];

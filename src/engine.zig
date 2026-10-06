@@ -59,6 +59,7 @@ pub const Engine = struct {
     service: Service,
     state: State = .idle,
     authenticated: bool = false,
+    service_live: bool = false,
     message: []u8 = undefined,
 
     pub fn init(alloc: std.mem.Allocator, service: Service) std.mem.Allocator.Error!Engine {
@@ -97,6 +98,12 @@ pub const Engine = struct {
         } else |_| {}
     }
 
+    fn stopLive(e: *Engine) void {
+        if (!e.service_live) return;
+        e.service_live = false;
+        e.service.stopFn(e.service.ctx);
+    }
+
     fn startChain(e: *Engine) Service.StartError!void {
         try e.transition(.starting, State.starting.name());
         e.service.startFn(e.service.ctx) catch |err| {
@@ -106,10 +113,11 @@ pub const Engine = struct {
             e.fail("start failed");
             return err;
         };
+        e.service_live = true;
         e.transition(.connected, State.connected.name()) catch {
             // Resource acquired but the state publish failed: release it.
-            // down() later sees error and does not stop again.
-            e.service.stopFn(e.service.ctx);
+            // Ownership is cleared, so down() does not stop again.
+            e.stopLive();
             e.fail("start failed");
             return error.OutOfMemory;
         };
@@ -119,7 +127,10 @@ pub const Engine = struct {
     /// service transiently and never stored. Empty key -> needs_login; any
     /// service failure -> error with a stable key-free message. A failed
     /// attempt leaves `authenticated` unchanged; call again to retry.
+    /// Like the v0.80 daemon, connected login reuses the live service
+    /// without consuming the key or starting another chain.
     pub fn login(e: *Engine, setup_key: []const u8) LoginError!void {
+        if (e.service_live) return;
         if (setup_key.len == 0) {
             try e.transition(.needs_login, "setup key required");
             return error.MissingSetupKey;
@@ -140,17 +151,16 @@ pub const Engine = struct {
             try e.transition(.needs_login, "not authenticated");
             return error.NotAuthenticated;
         }
-        if (e.state == .connected) return;
+        if (e.service_live) return;
         try e.startChain();
     }
 
     /// Ensure stopped. Idempotent from any state; the service stop runs
-    /// only when leaving a live (connected/starting) state, so repeated
+    /// only when owning a live service, independently of display state. Repeated
     /// downs never re-invoke it. State is stopped on return even when the
     /// message copy fails with OutOfMemory.
     pub fn down(e: *Engine) std.mem.Allocator.Error!void {
-        const live = e.state == .connected or e.state == .starting;
-        if (live) e.service.stopFn(e.service.ctx);
+        e.stopLive();
         e.state = .stopped;
         const n = try e.alloc.dupe(u8, State.stopped.name());
         e.alloc.free(e.message);
