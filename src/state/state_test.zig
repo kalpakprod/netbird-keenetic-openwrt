@@ -458,3 +458,64 @@ test "updateRaw accepts duplicate member names like Go RawMessage" {
     defer std.testing.allocator.free(data2);
     try std.testing.expectEqualSlices(u8, data, data2);
 }
+
+test "F1 loaded nested duplicates merge and top-level last wins" {
+    const root = try scratchRoot(std.testing.allocator, "nested");
+    defer std.testing.allocator.free(root);
+    defer cleanup(root);
+    try std.Io.Dir.createDirAbsolute(tio, root, .default_dir);
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/state.json", .{root});
+    defer std.testing.allocator.free(path);
+    for ([_][]const u8{
+        "{\"x\":{\"v\":{\"a\":1},\"v\":{\"b\":2}}}",
+        "{\"x\":{\"v\":{\"a\":9,\"b\":9}},\"x\":{\"v\":{\"a\":1},\"v\":{\"b\":2}}}",
+    }) |input| {
+        const f = try std.Io.Dir.createFileAbsolute(tio, path, .{});
+        try f.writePositionalAll(tio, input, 0);
+        f.close(tio);
+        var m = state.Manager.init(std.testing.allocator, tio, path);
+        defer m.deinit();
+        try m.register("x");
+        try m.load("x");
+        var got = (try m.get("x", struct { v: struct { a: i64 = 0, b: i64 = 0 } })).?;
+        defer got.deinit();
+        try std.testing.expectEqual(@as(i64, 1), got.value.v.a);
+        try std.testing.expectEqual(@as(i64, 2), got.value.v.b);
+    }
+}
+
+test "F2 stale temp cannot determine saved permissions" {
+    const root = try scratchRoot(std.testing.allocator, "stale");
+    defer std.testing.allocator.free(root);
+    defer cleanup(root);
+    try std.Io.Dir.createDirAbsolute(tio, root, .default_dir);
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/state.json", .{root});
+    defer std.testing.allocator.free(path);
+    const tmp = try std.fmt.allocPrint(std.testing.allocator, "{s}/.state.json.tmp.{d}.{d}", .{ root, std.os.linux.getpid(), std.os.linux.gettid() });
+    defer std.testing.allocator.free(tmp);
+    const f = try std.Io.Dir.createFileAbsolute(tio, tmp, .{ .exclusive = true });
+    try f.setPermissions(tio, @fromBackingInt(0o644));
+    f.close(tio);
+    var m = state.Manager.init(std.testing.allocator, tio, path);
+    defer m.deinit();
+    try m.register("x");
+    try m.updateRaw("x", "2");
+    try m.persist();
+    const st = try std.Io.Dir.cwd().statFile(tio, path, .{});
+    try std.testing.expectEqual(@as(u32, 0o600), @as(u32, @backingInt(st.permissions)) & 0o777);
+}
+
+test "F3 arrays and objects stop at 10000 containers" {
+    var m = state.Manager.init(std.testing.allocator, tio, "unused");
+    defer m.deinit();
+    try m.register("x");
+    for ([_]bool{ false, true }) |object| {
+        for ([_]usize{ 10000, 10001 }) |depth| {
+            var raw: std.ArrayList(u8) = .empty;
+            defer raw.deinit(std.testing.allocator);
+            for (0..depth) |i| try raw.appendSlice(std.testing.allocator, if (object and i + 1 < depth) "{\"x\":" else if (object) "{" else "[");
+            for (0..depth) |_| try raw.append(std.testing.allocator, if (object) '}' else ']');
+            if (depth == 10000) try m.updateRaw("x", raw.items) else try std.testing.expectError(profile.FileError.InvalidJson, m.updateRaw("x", raw.items));
+        }
+    }
+}

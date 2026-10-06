@@ -21,6 +21,7 @@ pub const Error = profile.FileError || std.mem.Allocator.Error || error{
 const Entry = struct {
     raw: []u8,
     registered: bool,
+    loaded: bool = false,
 };
 
 pub const Manager = struct {
@@ -79,6 +80,7 @@ pub const Manager = struct {
         try m.markDirty(name);
         m.allocator.free(e.raw);
         e.raw = replacement;
+        e.loaded = false;
     }
 
     /// UpdateState: replaces the state value (compact JSON), marks dirty.
@@ -111,6 +113,15 @@ pub const Manager = struct {
     pub fn get(m: *Manager, name: []const u8, comptime T: type) Error!?std.json.Parsed(T) {
         const e = m.entries.get(name) orelse return Error.StateNotRegistered;
         if (std.mem.eql(u8, e.raw, "null")) return null;
+        if (e.loaded) {
+            var arena = std.heap.ArenaAllocator.init(m.allocator);
+            errdefer arena.deinit();
+            const value = loadedValue(T, arena.allocator(), e.raw) catch return Error.CorruptState;
+            const parsed = std.json.parseFromValueLeaky(T, arena.allocator(), value, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return Error.CorruptState;
+            const owner = try m.allocator.create(std.heap.ArenaAllocator);
+            owner.* = arena;
+            return .{ .arena = owner, .value = parsed };
+        }
         return std.json.parseFromSlice(T, m.allocator, e.raw, .{
             .ignore_unknown_fields = true,
             .allocate = .alloc_always,
@@ -121,12 +132,18 @@ pub const Manager = struct {
 
     /// LoadState: reloads one state from the file into memory.
     pub fn load(m: *Manager, name: []const u8) Error!void {
-        const raw_states = try m.loadStateFile(false);
-        var states = raw_states orelse return;
-        defer states.deinit();
-        const raw = states.value.map.get(name) orelse return;
-        // loadSingleRawState: "null" decodes to a nil (deleted) state.
-        if (raw == .null) {
+        const data = profile.readFileLseek(m.io, m.allocator, m.file_path) catch |err| switch (err) {
+            profile.FileError.NotFound => return,
+            else => return err,
+        };
+        defer m.allocator.free(data);
+        var first: usize = 0;
+        skipWs(data, &first);
+        if (first >= data.len) return Error.CorruptState;
+        const span = sectionSpan(m.allocator, data, name) catch return Error.CorruptState;
+        const selected = span orelse return;
+        const section = data[selected.start..selected.end];
+        if (std.mem.eql(u8, section, "null")) {
             if (m.entries.getPtr(name)) |e| {
                 const replacement = try m.allocator.dupe(u8, "null");
                 m.allocator.free(e.raw);
@@ -134,14 +151,11 @@ pub const Manager = struct {
             }
             return;
         }
-        const section = std.json.Stringify.valueAlloc(m.allocator, raw, .{}) catch {
-            return Error.CorruptState;
-        };
-        defer m.allocator.free(section);
         if (m.entries.getPtr(name)) |e| {
             const replacement = try m.allocator.dupe(u8, section);
             m.allocator.free(e.raw);
             e.raw = replacement;
+            e.loaded = true;
         }
     }
 
@@ -206,21 +220,22 @@ pub const Manager = struct {
     ) Error!void {
         const ent = m.entries.get(name) orelse return Error.StateNotRegistered;
         if (!ent.registered) return Error.StateNotRegistered;
-        const raw_states = try m.loadStateFile(false);
-        var states = raw_states orelse return;
-        defer states.deinit();
-        const raw = states.value.map.get(name) orelse return;
-        if (raw == .null) return;
-        const section = std.json.Stringify.valueAlloc(m.allocator, raw, .{}) catch {
-            return Error.CorruptState;
+        const data = profile.readFileLseek(m.io, m.allocator, m.file_path) catch |err| switch (err) {
+            profile.FileError.NotFound => return,
+            else => return err,
         };
-        defer m.allocator.free(section);
-        var parsed = std.json.parseFromSlice(T, m.allocator, section, .{
+        defer m.allocator.free(data);
+        const span = try sectionSpan(m.allocator, data, name);
+        const selected = span orelse return;
+        const section = data[selected.start..selected.end];
+        if (std.mem.eql(u8, section, "null")) return;
+        var arena = std.heap.ArenaAllocator.init(m.allocator);
+        defer arena.deinit();
+        const value = loadedValue(T, arena.allocator(), section) catch return Error.CorruptState;
+        var parsed = std.json.parseFromValue(T, m.allocator, value, .{
             .ignore_unknown_fields = true,
             .allocate = .alloc_always,
-        }) catch {
-            return Error.CorruptState;
-        };
+        }) catch return Error.CorruptState;
         defer parsed.deinit();
         cleanup_fn(&parsed.value) catch {
             // Preserve the state on cleanup error, like Go.
@@ -385,7 +400,7 @@ fn sectionSpan(allocator: std.mem.Allocator, data: []const u8, name: []const u8)
             pos += 1;
             skipWs(data, &pos);
             const val_start = pos;
-            skipValue(data, &pos, 0) catch return Error.CorruptState;
+            skipValue(data, &pos, 1) catch return Error.CorruptState;
             const matches = decodeKeyEquals(allocator, key_raw, name) catch return Error.CorruptState;
             if (matches) found = .{ .start = val_start, .end = pos };
             skipWs(data, &pos);
@@ -511,11 +526,11 @@ fn jsonValid(data: []const u8) bool {
 /// numbers, strict escapes, duplicate members accepted, max depth
 /// 10000). pos starts past leading ws and ends past the value.
 fn skipValue(data: []const u8, pos: *usize, depth: u32) ScanError!void {
-    if (depth > 10000) return ScanError.TooDeep;
     skipWs(data, pos);
     if (pos.* >= data.len) return ScanError.InvalidJson;
     switch (data[pos.*]) {
         '{' => {
+            if (depth >= 10000) return ScanError.TooDeep;
             pos.* += 1;
             skipWs(data, pos);
             if (pos.* < data.len and data[pos.*] == '}') {
@@ -544,6 +559,7 @@ fn skipValue(data: []const u8, pos: *usize, depth: u32) ScanError!void {
             }
         },
         '[' => {
+            if (depth >= 10000) return ScanError.TooDeep;
             pos.* += 1;
             skipWs(data, pos);
             if (pos.* < data.len and data[pos.*] == ']') {
@@ -665,24 +681,32 @@ fn writeBytesAtomic(io: std.Io, path: []const u8, bytes: []const u8) profile.Fil
     const base = std.fs.path.basename(path);
     const pid = std.os.linux.getpid();
     const rand: u32 = @bitCast(std.os.linux.gettid());
-    const tmp = std.fmt.bufPrint(&tmp_name, "{s}/.{s}.tmp.{d}.{d}", .{ dir, base, pid, rand }) catch {
+    var original_name: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp = std.fmt.bufPrint(&original_name, "{s}/.{s}.tmp.{d}.{d}", .{ dir, base, pid, rand }) catch {
         return profile.FileError.WriteFailed;
     };
-    {
-        const tmp_file = std.Io.Dir.createFileAbsolute(io, tmp, .{
-            .truncate = true,
+    var tmp_file: std.Io.File = undefined;
+    var chosen: []const u8 = undefined;
+    var suffix: usize = 0;
+    while (suffix < 100) : (suffix += 1) {
+        const candidate = if (suffix == 0) tmp else std.fmt.bufPrint(&tmp_name, "{s}.{d}", .{ tmp, suffix }) catch return profile.FileError.WriteFailed;
+        tmp_file = std.Io.Dir.createFileAbsolute(io, candidate, .{
+            .exclusive = true,
             .permissions = @fromBackingInt(@intCast(0o600)),
-        }) catch {
-            return profile.FileError.WriteFailed;
+        }) catch |err| switch (err) {
+            error.PathAlreadyExists => continue,
+            else => return profile.FileError.WriteFailed,
         };
-        defer tmp_file.close(io);
-        tmp_file.writePositionalAll(io, bytes, 0) catch {
-            std.Io.Dir.deleteFileAbsolute(io, tmp) catch {};
-            return profile.FileError.WriteFailed;
-        };
-    }
-    std.Io.Dir.renameAbsolute(tmp, path, io) catch {
-        std.Io.Dir.deleteFileAbsolute(io, tmp) catch {};
+        chosen = candidate;
+        break;
+    } else return profile.FileError.WriteFailed;
+    defer tmp_file.close(io);
+    tmp_file.writePositionalAll(io, bytes, 0) catch {
+        std.Io.Dir.deleteFileAbsolute(io, chosen) catch {};
+        return profile.FileError.WriteFailed;
+    };
+    std.Io.Dir.renameAbsolute(chosen, path, io) catch {
+        std.Io.Dir.deleteFileAbsolute(io, chosen) catch {};
         return profile.FileError.RenameFailed;
     };
 }
@@ -708,4 +732,57 @@ fn makePathAbsolute(io: std.Io, path: []const u8) profile.FileError!void {
             else => return profile.FileError.MkdirFailed,
         };
     }
+}
+
+// Decode only after selection. Duplicate struct objects merge in input order,
+// while scalar fields and map entries retain last-wins behavior.
+fn loadedValue(comptime T: type, allocator: std.mem.Allocator, raw: []const u8) !std.json.Value {
+    if (@typeInfo(T) != .@"struct") return std.json.parseFromSliceLeaky(std.json.Value, allocator, raw, .{ .allocate = .alloc_always, .duplicate_field_behavior = .use_last, .parse_numbers = false });
+    var pos: usize = 0;
+    skipWs(raw, &pos);
+    if (raw[pos] != '{') return std.json.parseFromSliceLeaky(std.json.Value, allocator, raw, .{ .allocate = .alloc_always, .duplicate_field_behavior = .use_last, .parse_numbers = false });
+    pos += 1;
+    var result: std.json.Value = .{ .object = .empty };
+    while (true) {
+        skipWs(raw, &pos);
+        if (raw[pos] == '}') break;
+        const start = pos;
+        try skipString(raw, &pos);
+        const key = try std.json.parseFromSliceLeaky([]const u8, allocator, raw[start..pos], .{ .allocate = .alloc_always });
+        skipWs(raw, &pos);
+        pos += 1;
+        skipWs(raw, &pos);
+        const value_start = pos;
+        try skipValue(raw, &pos, 0);
+        inline for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types) |field_name, field_type| {
+            if (std.mem.eql(u8, key, field_name)) {
+                var value = try loadedValue(field_type, allocator, raw[value_start..pos]);
+                if (result.object.get(key)) |previous| value = try mergeLoaded(field_type, allocator, previous, value);
+                try result.object.put(allocator, key, value);
+                break;
+            }
+        }
+        skipWs(raw, &pos);
+        if (raw[pos] == '}') break;
+        pos += 1;
+    }
+    return result;
+}
+
+fn mergeLoaded(comptime T: type, allocator: std.mem.Allocator, previous: std.json.Value, next: std.json.Value) !std.json.Value {
+    if (@typeInfo(T) != .@"struct") return next;
+    if (previous != .object or next != .object) return next;
+    var merged = previous;
+    var it = next.object.iterator();
+    while (it.next()) |item| {
+        var value = item.value_ptr.*;
+        inline for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types) |name, F| {
+            if (std.mem.eql(u8, item.key_ptr.*, name)) {
+                if (merged.object.get(name)) |old| value = try mergeLoaded(F, allocator, old, value);
+                break;
+            }
+        }
+        try merged.object.put(allocator, item.key_ptr.*, value);
+    }
+    return merged;
 }
