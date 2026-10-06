@@ -357,6 +357,7 @@ test "live: tls with self-signed ip-san cert" {
         .port = server.port,
         .path = "/relay",
         .tls = .self_signed,
+        .server_name = "localhost",
     });
     defer conn.destroy();
     // bigger than one TLS record to cross record boundaries
@@ -367,4 +368,36 @@ test "live: tls with self-signed ip-san cert" {
     const msg = try conn.readMessage(&buf);
     try std.testing.expectEqualSlices(u8, &payload, msg.data);
     conn.close(.normal);
+}
+
+test "one-byte close payload is a protocol error" {
+    var t: TestConn = undefined;
+    try t.init(&.{0x88, 1, 0});
+    defer t.deinit();
+    var buf: [16]u8 = undefined;
+    try std.testing.expectError(ws.Error.ProtocolError, t.c.readMessage(&buf));
+    try std.testing.expectEqual(@as(usize, 0), t.out.written().len);
+
+}
+
+test "live: destroy closes stream without close" {
+    const bin = try goHelperPath();
+    defer std.testing.allocator.free(bin);
+    var server: GoServer = undefined;
+    const dir = (try getenv(std.testing.allocator, "NB_WS_TEST_TLS")) orelse return error.SkipZigTest;
+    defer std.testing.allocator.free(dir);
+    try server.start(bin, "tls", dir);
+    defer server.stop() catch {};
+    const conn = try ws.connect(std.testing.allocator, tio, .{ .host = "127.0.0.1", .port = server.port, .tls = .self_signed, .path = "/relay" });
+    const fd = conn.net.?.stream.socket.handle;
+    conn.destroy();
+    try std.testing.expectEqual(std.os.linux.E.BADF, std.os.linux.errno(std.os.linux.fcntl(fd, std.os.linux.F.GETFD, 0)));
+
+}
+
+test "IPv6 Host header uses brackets at default and explicit ports" {
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings("[::1]", try ws.formatHost(&buf, "::1", 80));
+    try std.testing.expectEqualStrings("[::1]:443", try ws.formatHost(&buf, "::1", 443));
+    try std.testing.expectEqualStrings("127.0.0.1:443", try ws.formatHost(&buf, "127.0.0.1", 443));
 }
