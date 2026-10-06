@@ -280,6 +280,12 @@ pub const Conn = struct {
         return null;
     }
 
+    /// Release local capacity without sending a frame. Closed or unknown ids are no-ops.
+    pub fn releaseStream(c: *Conn, id: u32) void {
+        const sm = c.findStream(id) orelse return;
+        sm.state = .closed;
+    }
+
     /// Release locally even when the peer does not echo RST_STREAM.
     pub fn resetStream(c: *Conn, id: u32, code: frame.ErrCode) Error!void {
         const sm = c.findStream(id) orelse return Error.StreamClosed;

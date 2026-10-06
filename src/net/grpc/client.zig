@@ -290,9 +290,8 @@ pub fn recvMessage(c: *Call) Error!?[]const u8 {
                     c.status_code = 13;
                     try c.status_msg.appendSlice(c.alloc, "server closed the stream without sending trailers");
                     c.done = true;
-                    c.conn.resetStream(c.stream_id, .cancel) catch |err| {
-                        if (err != error.StreamClosed) return err;
-                    };
+                    // grpc-go closes this terminal path with rst=false, returning quota only.
+                    c.conn.releaseStream(c.stream_id);
                     if (try c.popMessage()) |msg| return msg;
                     return null;
                 }

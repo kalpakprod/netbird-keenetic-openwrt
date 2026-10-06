@@ -523,3 +523,25 @@ test "crossing reset is discarded but active reset remains visible" {
     try std.testing.expectEqual(next, reset.stream_id);
     try std.testing.expectEqual(frame.ErrCode.cancel, reset.code);
 }
+
+test "local release closes the slot without writing or changing credit" {
+    var p = Pipe{ .inbound = &.{} };
+    var c = conn.Conn.init(p.transport());
+    c.peer_max_concurrent = 1;
+    const sid = try c.writeHeaders(&.{.{ .name = ":method", .value = "POST" }}, false);
+    const before = p.out_len;
+    const stream_before = c.streams[0];
+    const recv_before = c.conn_recv_window;
+    const send_before = c.conn_send_window;
+    c.releaseStream(sid);
+    try std.testing.expectEqual(conn.StreamState.closed, c.streams[0].state);
+    try std.testing.expectEqual(stream_before.recv_window, c.streams[0].recv_window);
+    try std.testing.expectEqual(stream_before.send_window, c.streams[0].send_window);
+    try std.testing.expectEqual(recv_before, c.conn_recv_window);
+    try std.testing.expectEqual(send_before, c.conn_send_window);
+    c.releaseStream(sid);
+    c.releaseStream(999);
+    try std.testing.expectError(conn.Error.StreamClosed, c.resetStream(sid, .cancel));
+    try std.testing.expectEqual(before, p.out_len);
+    try std.testing.expectEqual(@as(u32, 3), try c.writeHeaders(&.{.{ .name = ":method", .value = "POST" }}, false));
+}
