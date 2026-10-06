@@ -506,6 +506,30 @@ pub const Packer = struct {
     fn packName(p: *Packer, name: []const u8, compress: bool) Error!void {
         if (name.len == 0) return; // miekg: empty name packs nothing
         if (name[name.len - 1] != '.') return Error.NotFqdn;
+        // Match miekg IsFqdn's strings.LastIndexFunc byte offset exactly.
+        const end = name.len - 1;
+        var terminal = end;
+        while (terminal > 0 and name[terminal - 1] == '\\') terminal -= 1;
+        if (terminal != end) {
+            // DecodeLastRuneInString: a valid rune ending here has its start
+            // at most four bytes back. Invalid UTF-8 consumes a single byte.
+            var width: usize = 1;
+            if (terminal > 0 and name[terminal - 1] >= 0x80) {
+                const limit = @min(terminal, 4);
+                var candidate: usize = 2;
+                while (candidate <= limit) : (candidate += 1) {
+                    const rune = name[terminal - candidate .. terminal];
+                    const size = std.unicode.utf8ByteSequenceLength(rune[0]) catch continue;
+                    if (size != candidate) continue;
+                    _ = std.unicode.utf8Decode(rune) catch continue;
+                    width = candidate;
+                    break;
+                }
+            }
+            // With no non-backslash rune Go returns index -1.
+            const distance = if (terminal == 0) end + 1 else end - terminal + width;
+            if (distance % 2 == 0) return Error.NotFqdn;
+        }
 
         var pointer: ?u15 = null;
         var begin: usize = 0; // presentation index of the current label
