@@ -14,6 +14,8 @@ pub const messages = msgs;
 pub const auth = @import("auth.zig");
 
 pub const Error = error{
+    Closed,
+    Canceled,
     Timeout,
     DeadlineUnsupported,
     HandshakeFailed,
@@ -39,6 +41,8 @@ pub fn Client(comptime Conn: type) type {
         conn: Conn,
         own_id: msgs.PeerID,
         wbuf: []u8,
+        closed: bool = false,
+        subscriptions: std.ArrayListUnmanaged(msgs.PeerID) = .empty,
 
         const Self = @This();
 
@@ -65,10 +69,46 @@ pub fn Client(comptime Conn: type) type {
         }
 
         pub fn destroy(c: *Self) void {
-            c.conn.close(.normal);
+            c.close();
+            c.subscriptions.deinit(c.gpa);
             c.conn.destroy();
             c.gpa.free(c.wbuf);
             c.gpa.destroy(c);
+        }
+
+        /// Serialized with other client calls. destroy must run after readers exit.
+        pub fn close(c: *Self) void {
+            if (c.closed) return;
+            c.closed = true;
+            c.subscriptions.clearRetainingCapacity();
+            c.conn.writeMessage(.binary, &msgs.marshalCloseMsg()) catch {};
+            c.conn.close(.normal);
+        }
+
+        /// Port of v0.80 peer_subscription.go: send first, then clean up even
+        /// when the transport write fails, returning that error to the caller.
+        pub fn unsubscribe(c: *Self, dst: msgs.PeerID) Error!void {
+            if (!c.subscribed(dst)) return;
+            defer c.removeSubscription(dst);
+            if (c.closed) return error.Closed;
+            const msg = try msgs.marshalPeerIDs(c.wbuf, &.{dst}, .unsubscribe_peer_state);
+            try c.conn.writeMessage(.binary, msg);
+        }
+
+        fn removeSubscription(c: *Self, dst: msgs.PeerID) void {
+            for (c.subscriptions.items, 0..) |id, i| {
+                if (std.mem.eql(u8, &id, &dst)) {
+                    _ = c.subscriptions.swapRemove(i);
+                    return;
+                }
+            }
+        }
+
+        fn subscribed(c: *Self, dst: msgs.PeerID) bool {
+            for (c.subscriptions.items) |id| {
+                if (std.mem.eql(u8, &id, &dst)) return true;
+            }
+            return false;
         }
 
         fn expectAuthResponse(c: *Self, deadline_ms: ?i64) Error!void {
@@ -83,6 +123,10 @@ pub fn Client(comptime Conn: type) type {
         /// Subscribes to the peer's state; the server answers with PeersOnline
         /// once the peer is connected (immediately if it already is).
         pub fn subscribe(c: *Self, dst: msgs.PeerID) Error!void {
+            if (c.closed) return error.Closed;
+            const added = !c.subscribed(dst);
+            if (added) try c.subscriptions.append(c.gpa, dst);
+            errdefer if (added) c.removeSubscription(dst);
             const msg = try msgs.marshalPeerIDs(c.wbuf, &.{dst}, .subscribe_peer_state);
             try c.conn.writeMessage(.binary, msg);
         }
@@ -96,6 +140,8 @@ pub fn Client(comptime Conn: type) type {
         pub fn waitPeerOnlineDeadline(c: *Self, dst: msgs.PeerID, deadline_ms: ?i64) Error!void {
             var rbuf: [msgs.max_message_size]u8 = undefined;
             var peers: [msgs.max_peers_per_message]msgs.PeerID = undefined;
+            if (c.closed) return error.Closed;
+            if (!c.subscribed(dst)) return error.Canceled;
             while (true) {
                 const msg = try c.readMessage(&rbuf, deadline_ms);
                 _ = try msgs.validateVersion(msg.data);
@@ -108,7 +154,10 @@ pub fn Client(comptime Conn: type) type {
                         }
                     },
                     .health_check => try c.writeHealthcheck(),
-                    .close => return Error.ConnectionClosed,
+                    .close => {
+                        c.remoteClosed();
+                        return error.Closed;
+                    },
                     else => {},
                 }
             }
@@ -116,6 +165,7 @@ pub fn Client(comptime Conn: type) type {
 
         /// Sends a payload to the peer (the server stamps the sender id).
         pub fn sendTo(c: *Self, dst: msgs.PeerID, payload: []const u8) Error!void {
+            if (c.closed) return error.Closed;
             const msg = try msgs.marshalTransportMsg(c.wbuf, dst, payload);
             try c.conn.writeMessage(.binary, msg);
         }
@@ -141,7 +191,10 @@ pub fn Client(comptime Conn: type) type {
                         return tm;
                     },
                     .health_check => try c.writeHealthcheck(),
-                    .close => return Error.ConnectionClosed,
+                    .close => {
+                        c.remoteClosed();
+                        return error.Closed;
+                    },
                     else => {},
                 }
             }
@@ -151,16 +204,37 @@ pub fn Client(comptime Conn: type) type {
         // readMessageDeadline must bound the entire message read, including
         // partial frames. Timeout preserves framing and leaves the stream usable.
         // A transport unable to preserve framing must close itself on timeout.
+        fn remoteClosed(c: *Self) void {
+            c.closed = true;
+            c.subscriptions.clearRetainingCapacity();
+            c.conn.close(.normal);
+        }
+
+        fn readError(c: *Self, err: Error) Error {
+            switch (err) {
+                error.EndOfStream, error.CloseReceived, error.ConnectionClosed => {
+                    c.remoteClosed();
+                    return error.Closed;
+                },
+                error.Timeout, error.DeadlineUnsupported => return err,
+                else => {
+                    c.remoteClosed();
+                    return err;
+                },
+            }
+        }
+
         fn readMessage(c: *Self, out: []u8, deadline_ms: ?i64) Error!struct { data: []const u8 } {
+            if (c.closed) return error.Closed;
             if (deadline_ms) |deadline| {
                 const T = switch (@typeInfo(Conn)) { .pointer => |p| p.child, else => Conn };
                 if (@hasDecl(T, "readMessageDeadline")) {
-                    const msg = try c.conn.readMessageDeadline(out, deadline);
+                    const msg = c.conn.readMessageDeadline(out, deadline) catch |err| return c.readError(err);
                     return .{ .data = msg.data };
                 }
                 return error.DeadlineUnsupported;
             }
-            const msg = try c.conn.readMessage(out);
+            const msg = c.conn.readMessage(out) catch |err| return c.readError(err);
             return .{ .data = msg.data };
         }
 
