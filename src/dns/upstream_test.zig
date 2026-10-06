@@ -250,6 +250,8 @@ const DualStub = struct {
     udp_size: std.atomic.Value(u16) = .init(0),
     tcp_seen: std.atomic.Value(u32) = .init(0),
     wrong_tcp_id: std.atomic.Value(bool) = .init(false),
+    oversized_empty: std.atomic.Value(bool) = .init(false),
+    tcp_truncated: std.atomic.Value(bool) = .init(false),
 
     fn serve(ctx: *anyopaque, arena: std.mem.Allocator, q: *const msg.Message, transport: chain_mod.Transport) chain_mod.ServeError!chain_mod.Outcome {
         const s: *DualStub = @ptrCast(@alignCast(ctx));
@@ -264,9 +266,21 @@ const DualStub = struct {
             reply.header.truncated = true;
         } else {
             if (s.wrong_tcp_id.load(.acquire)) reply.header.id +%= 1;
-            const records = try arena.alloc(msg.RR, 100);
-            for (records) |*rr| rr.* = .{.name = q.question[0].name, .type = .a, .class = 1, .ttl = 30, .data = .{.a = .{203,0,113,20}}};
-            reply.answer = records;
+            if (s.oversized_empty.load(.acquire)) {
+                const data = try arena.alloc(u8, 600);
+                @memset(data, 0xaa);
+                const extra = try arena.alloc(msg.RR, 1);
+                extra[0] = msg.makeOpt(1232, false);
+                const options = try arena.alloc(msg.Option, 1);
+                options[0] = .{ .code = 65001, .data = data };
+                extra[0].data = .{ .opt = options };
+                reply.extra = extra;
+                reply.header.truncated = s.tcp_truncated.load(.acquire);
+            } else {
+                const records = try arena.alloc(msg.RR, 100);
+                for (records) |*rr| rr.* = .{.name = q.question[0].name, .type = .a, .class = 1, .ttl = 30, .data = .{.a = .{203,0,113,20}}};
+                reply.answer = records;
+            }
         }
         return .{.response = reply};
     }
@@ -305,4 +319,35 @@ test "MTU cap and TCP retry truncate to pre-cap client buffer, TCP direct stays 
     try std.testing.expect(!direct.header.truncated);
     stub.wrong_tcp_id.store(true, .release);
     try std.testing.expectError(error.IdMismatch, up.exchange(a, addr, &q, .tcp, 1000));
+}
+
+
+test "truncate preserves TC when question and OPT alone exceed limit" {
+    var stub = DualStub{};
+    stub.oversized_empty.store(true, .release);
+    var chain = chain_mod.Chain.init(std.testing.allocator);
+    defer chain.deinit();
+    try chain.add(".", .{.ctx = &stub, .match_subdomains = true, .serveFn = DualStub.serve}, 0);
+    var server = try @import("server.zig").Server.bind(.{.ip4 = .{.bytes = .{127,0,0,1}, .port = 0}}, &chain);
+    defer server.close();
+    const thread = try std.Thread.spawn(.{}, @import("server.zig").Server.serveLoop, .{&server});
+    defer { server.requestStop(); thread.join(); }
+    var up = upstream_mod.Upstream.init(std.testing.allocator);
+    defer up.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var q = try queryOf(arena.allocator(), "ok.example.", .a);
+    var opt = [_]msg.RR{msg.makeOpt(512, true)};
+    q.extra = &opt;
+    const addr: std.Io.net.IpAddress = .{.ip4 = .{.bytes = .{127,0,0,1}, .port = try server.localPort()}};
+    const ordinary = try up.exchange(arena.allocator(), addr, &q, .udp, 1000);
+    try std.testing.expect(!ordinary.header.truncated);
+    try std.testing.expectEqual(@as(usize, 0), ordinary.answer.len);
+    try std.testing.expectEqual(@as(usize, 0), ordinary.ns.len);
+    try std.testing.expectEqual(@as(usize, 1), ordinary.extra.len);
+    var buf: [65535]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 643), (try msg.pack(arena.allocator(), &ordinary, &buf)).len);
+    stub.tcp_truncated.store(true, .release);
+    const pre_set = try up.exchange(arena.allocator(), addr, &q, .udp, 1000);
+    try std.testing.expect(pre_set.header.truncated);
 }
