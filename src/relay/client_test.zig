@@ -1,0 +1,361 @@
+// Relay client tests. Unit tests drive the client over an in-memory fake
+// conn with hand-rolled websocket frames. The live orchestration (upstream
+// relay server, two clients, the Go client helper) lives in
+// ~/.cache/netbird-zig-context/gen/relay_live.zig — the build system roots
+// each test suite in its own directory, so a cross-directory live test cannot
+// import src/net/ws from here.
+
+const std = @import("std");
+const testing = std.testing;
+const msgs = @import("messages.zig");
+const auth = @import("auth.zig");
+const client = @import("client.zig");
+
+/// Encodes one server-side (unmasked) websocket frame, mirroring what a real
+/// server sends.
+fn serverFrame(out: []u8, fin: bool, opcode_u4: u4, payload: []const u8) []u8 {
+    var i: usize = 0;
+    out[i] = (if (fin) @as(u8, 0x80) else 0) | opcode_u4;
+    i += 1;
+    if (payload.len < 126) {
+        out[i] = @intCast(payload.len);
+        i += 1;
+    } else if (payload.len <= 0xffff) {
+        out[i] = 126;
+        std.mem.writeInt(u16, out[i + 1 ..][0..2], @intCast(payload.len), .big);
+        i += 3;
+    } else {
+        out[i] = 127;
+        std.mem.writeInt(u64, out[i + 1 ..][0..8], @intCast(payload.len), .big);
+        i += 9;
+    }
+    @memcpy(out[i..][0..payload.len], payload);
+    return out[0 .. i + payload.len];
+}
+
+const Opcode = struct {
+    const binary: u4 = 0x2;
+    const ping: u4 = 0x9;
+};
+
+/// In-memory conn: the "server" stream is preloaded bytes; client writes are
+/// collected. Implements the readMessage/writeMessage surface of ws.Conn.
+const FakeConn = struct {
+    gpa: std.mem.Allocator,
+    server_stream: std.Io.Reader,
+    server_buf: [8192]u8 = undefined,
+    written: std.ArrayListUnmanaged(u8) = .empty,
+    // ws.Conn surface bits the client calls
+    destroyed: bool = false,
+    fail_read: bool = false,
+    fail_write: bool = false,
+    write_attempts: usize = 0,
+    observed_client: ?*FakeClient = null,
+    subscriptions_at_write: usize = 0,
+
+    fn initInPlace(c: *FakeConn, gpa: std.mem.Allocator, server_frames: []const u8) void {
+        c.* = .{ .gpa = gpa, .server_stream = undefined };
+        c.server_stream = .fixed(&c.server_buf);
+        @memcpy(c.server_buf[0..server_frames.len], server_frames);
+        c.server_stream.end = server_frames.len;
+    }
+
+    fn deinit(c: *FakeConn) void {
+        c.written.deinit(c.gpa);
+    }
+
+    // --- ws.Conn-compatible surface (values; client uses c.conn.* where
+    // conn is a *ws.Conn, so pass &fake here) ---
+    pub fn writeMessage(c: *FakeConn, opcode: anytype, payload: []const u8) !void {
+        _ = opcode;
+        c.write_attempts += 1;
+        if (c.observed_client) |observed| c.subscriptions_at_write = observed.subscriptions.items.len;
+        if (c.fail_write) return error.WriteFailed;
+        try c.written.appendSlice(c.gpa, payload);
+    }
+
+    pub fn readMessage(c: *FakeConn, out: []u8) !struct { data: []const u8 } {
+        if (c.fail_read) return error.ReadFailed;
+        // decode one frame from server_stream
+        const hdr = try c.server_stream.takeArray(2);
+        const fin = hdr[0] & 0x80 != 0;
+        _ = fin;
+        const len7: u8 = hdr[1] & 0x7f;
+        var len: usize = len7;
+        switch (len7) {
+            126 => {
+                const ext = try c.server_stream.takeArray(2);
+                len = std.mem.readInt(u16, ext, .big);
+            },
+            127 => {
+                const ext = try c.server_stream.takeArray(8);
+                len = @intCast(std.mem.readInt(u64, ext, .big));
+            },
+            else => {},
+        }
+        try c.server_stream.readSliceAll(out[0..len]);
+        return .{ .data = out[0..len] };
+    }
+
+    pub fn readMessageDeadline(c: *FakeConn, out: []u8, deadline: i64) !struct { data: []const u8 } {
+        _ = deadline;
+        if (c.server_stream.seek == c.server_stream.end) return error.Timeout;
+        const msg = try c.readMessage(out);
+        return .{ .data = msg.data };
+    }
+
+    pub fn close(c: *FakeConn, code: anytype) void {
+        _ = c;
+        _ = code;
+    }
+
+    pub fn destroy(c: *FakeConn) void {
+        c.destroyed = true;
+    }
+};
+
+const FakeClient = client.Client(*FakeConn);
+
+fn authResponseFrame(buf: []u8, address: []const u8) []u8 {
+    var body: [msgs.max_handshake_resp_size]u8 = undefined;
+    const resp = msgs.marshalAuthResponse(&body, address) catch unreachable;
+    return serverFrame(buf, true, Opcode.binary, resp);
+}
+
+test "client: auth handshake sends auth msg and consumes authresponse" {
+    const gpa = testing.allocator;
+    var frame_buf: [9000]u8 = undefined;
+    const resp_frame = authResponseFrame(&frame_buf, "rel://127.0.0.1:33073");
+
+    var fake: FakeConn = undefined;
+    fake.initInPlace(gpa, resp_frame);
+    defer fake.deinit();
+
+    var token_buf: [auth.max_token_size]u8 = undefined;
+    const token = try auth.generateToken("secret", 3600, 1_700_000_000, &token_buf);
+
+    const c = try FakeClient.connect(gpa, &fake, .{ .peer_id = "peer-one", .token = token });
+    defer c.destroy();
+
+    // The client must have written exactly the auth message.
+    const sent = fake.written.items;
+    _ = try msgs.validateVersion(sent);
+    const t = try msgs.determineClientMessageType(sent);
+    try testing.expectEqual(.auth, t);
+    const am = try msgs.unmarshalAuthMsg(sent);
+    try testing.expectEqual(msgs.hashID("peer-one"), am.peer_id);
+    try testing.expectEqualSlices(u8, token, am.payload);
+}
+
+test "client: subscribe, wait online, transport both ways, healthcheck" {
+    const gpa = testing.allocator;
+    var fbs_buf: [9000]u8 = undefined;
+    var fbs = std.Io.Writer.fixed(&fbs_buf);
+
+    const id2 = msgs.hashID("peer-two");
+    // server script: authresp, peers_online(peer-two), transport from peer-two,
+    // healthcheck, transport from peer-two
+    var body: [9000]u8 = undefined;
+    _ = try fbs.write(authResponseFrame(&body, "rel://127.0.0.1:1"));
+    var ids_buf: [msgs.max_message_size]u8 = undefined;
+    const online = try msgs.marshalPeerIDs(&ids_buf, &.{id2}, .peers_online);
+    var f2: [9000]u8 = undefined;
+    _ = try fbs.write(serverFrame(&f2, true, Opcode.binary, online));
+    const transport = try msgs.marshalTransportMsg(&ids_buf, msgs.hashID("peer-one"), "from-peer-two");
+    var f3: [9000]u8 = undefined;
+    _ = try fbs.write(serverFrame(&f3, true, Opcode.binary, transport));
+    var f4: [9000]u8 = undefined;
+    _ = try fbs.write(serverFrame(&f4, true, Opcode.binary, &msgs.marshalHealthcheck()));
+    var f5: [9000]u8 = undefined;
+    _ = try fbs.write(serverFrame(&f5, true, Opcode.binary, transport));
+
+    var fake: FakeConn = undefined;
+    fake.initInPlace(gpa, fbs.buffered());
+    defer fake.deinit();
+
+    var token_buf: [auth.max_token_size]u8 = undefined;
+    const token = try auth.generateToken("secret", 3600, 1_700_000_000, &token_buf);
+
+    const c = try FakeClient.connect(gpa, &fake, .{ .peer_id = "peer-one", .token = token });
+    defer c.destroy();
+    fake.written.clearRetainingCapacity(); // drop the auth msg
+
+    try c.subscribe(id2);
+    const sub = fake.written.items;
+    try testing.expectEqual(.subscribe_peer_state, try msgs.determineClientMessageType(sub));
+    var ids_out: [msgs.max_peers_per_message]msgs.PeerID = undefined;
+    const n = try msgs.unmarshalPeerIDs(sub, ids_out[0..]);
+    try testing.expectEqual(@as(usize, 1), n);
+    try testing.expectEqual(id2, ids_out[0]);
+    fake.written.clearRetainingCapacity();
+
+    try c.waitPeerOnline(id2);
+
+    var out: [128]u8 = undefined;
+    const got = try c.recv(&out);
+    try testing.expectEqualStrings("from-peer-two", got.payload);
+    try testing.expectEqual(msgs.hashID("peer-one"), got.peer_id);
+
+    fake.written.clearRetainingCapacity();
+
+    // second recv processes the healthcheck frame, then the second transport
+    const got2 = try c.recv(&out);
+    try testing.expectEqualStrings("from-peer-two", got2.payload);
+
+    // the healthcheck must have been answered with the 2-byte reply
+    try testing.expectEqualSlices(u8, &msgs.marshalHealthcheck(), fake.written.items);
+
+    fake.written.clearRetainingCapacity();
+    try c.sendTo(id2, "to-peer-two");
+    const tm = try msgs.unmarshalTransportMsg(fake.written.items);
+    try testing.expectEqualStrings("to-peer-two", tm.payload);
+    try testing.expectEqual(id2, tm.peer_id);
+}
+
+test "client: deadlines stop blocked auth wait and recv" {
+    var fake: FakeConn = undefined;
+    fake.initInPlace(testing.allocator, &.{});
+    defer fake.deinit();
+    try testing.expectError(error.Timeout, FakeClient.connect(testing.allocator, &fake, .{ .peer_id = "a", .token = "", .deadline_ms = 123 }));
+    try testing.expect(fake.destroyed);
+    fake.deinit();
+    var frame: [9000]u8 = undefined;
+    fake.initInPlace(testing.allocator, authResponseFrame(&frame, "rel://localhost:1"));
+    const c = try FakeClient.connect(testing.allocator, &fake, .{ .peer_id = "a", .token = "" });
+    defer c.destroy();
+    try c.subscribe(msgs.hashID("b"));
+    try testing.expectError(error.Timeout, c.waitPeerOnlineDeadline(msgs.hashID("b"), 123));
+    var out: [32]u8 = undefined;
+    try testing.expectError(error.Timeout, c.recvDeadline(&out, 123));
+    try testing.expect(!fake.destroyed);
+}
+
+test "client: unsubscribe close and wait errors release state" {
+    var frame: [9000]u8 = undefined;
+    var fake: FakeConn = undefined;
+    fake.initInPlace(testing.allocator, authResponseFrame(&frame, "rel://localhost:1"));
+    defer fake.deinit();
+    const c = try FakeClient.connect(testing.allocator, &fake, .{ .peer_id = "a", .token = "" });
+    defer c.destroy();
+    const peer = msgs.hashID("b");
+    try c.subscribe(peer);
+    try c.unsubscribe(peer);
+    try testing.expectError(error.Canceled, c.waitPeerOnline(peer));
+    try c.subscribe(peer);
+    try testing.expectError(error.Closed, c.waitPeerOnline(peer));
+    var out: [16]u8 = undefined;
+    try testing.expectError(error.Closed, c.recv(&out));
+}
+
+test "client: explicit close sends relay close and is idempotent" {
+    var frame: [9000]u8 = undefined;
+    var fake: FakeConn = undefined;
+    fake.initInPlace(testing.allocator, authResponseFrame(&frame, "rel://localhost:1"));
+    defer fake.deinit();
+    const c = try FakeClient.connect(testing.allocator, &fake, .{ .peer_id = "a", .token = "" });
+    defer c.destroy();
+    fake.written.clearRetainingCapacity();
+    c.close();
+    c.close();
+    try testing.expectEqualSlices(u8, &msgs.marshalCloseMsg(), fake.written.items);
+    var out: [16]u8 = undefined;
+    try testing.expectError(error.Closed, c.recv(&out));
+}
+
+test "client: unexpected and malformed auth responses destroy owned transport" {
+    const inputs = [_][]const u8{ &msgs.marshalHealthcheck(), &.{ 1, 7 } };
+    const errors = [_]anyerror{ error.UnexpectedMessage, error.InvalidMessageLength };
+    for (inputs, errors) |input, expected| {
+        var frame: [9000]u8 = undefined;
+        var fake: FakeConn = undefined;
+        fake.initInPlace(testing.allocator, serverFrame(&frame, true, Opcode.binary, input));
+        defer fake.deinit();
+        try testing.expectError(expected, FakeClient.connect(testing.allocator, &fake, .{ .peer_id = "a", .token = "" }));
+        try testing.expect(fake.destroyed);
+    }
+}
+
+test "client: relay close and read failure terminate subscribed waits" {
+    for ([_]bool{ true, false }) |relay_close| {
+        var frame: [9000]u8 = undefined;
+        var bytes: [9000]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&bytes);
+        _ = try writer.write(authResponseFrame(&frame, "rel://localhost:1"));
+        if (relay_close) _ = try writer.write(serverFrame(&frame, true, Opcode.binary, &msgs.marshalCloseMsg()));
+        var fake: FakeConn = undefined;
+        fake.initInPlace(testing.allocator, writer.buffered());
+        defer fake.deinit();
+        const c = try FakeClient.connect(testing.allocator, &fake, .{ .peer_id = "a", .token = "" });
+        defer c.destroy();
+        try c.subscribe(msgs.hashID("b"));
+        fake.fail_read = !relay_close;
+        try testing.expectError(if (relay_close) error.Closed else error.ReadFailed, c.waitPeerOnline(msgs.hashID("b")));
+        var out: [8]u8 = undefined;
+        try testing.expectError(error.Closed, c.recv(&out));
+    }
+}
+
+// Expected wire bytes generated offline by the pinned v0.80 Go message codec.
+test "client: unsubscribe writes exact Go wire bytes and unknown peer writes nothing" {
+    var frame: [9000]u8 = undefined;
+    var fake: FakeConn = undefined;
+    fake.initInPlace(testing.allocator, authResponseFrame(&frame, "rel://localhost:1"));
+    defer fake.deinit();
+    const c = try FakeClient.connect(testing.allocator, &fake, .{ .peer_id = "a", .token = "" });
+    defer c.destroy();
+    const peer = msgs.hashID("peer-two");
+    try c.subscribe(peer);
+    fake.written.clearRetainingCapacity();
+    try c.unsubscribe(peer);
+    var expected: [38]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected, "01097368612d6892130cd3b3feb51093d582ee97bcd5dca0b7c53b60a15ed388ab496a42038b");
+    std.debug.print("L39 unsubscribe: expected_wire_bytes={d}, actual_wire_bytes={d}\n", .{ expected.len, fake.written.items.len });
+    try testing.expectEqualSlices(u8, &expected, fake.written.items);
+    try testing.expectEqual(@as(usize, 0), c.subscriptions.items.len);
+    try testing.expectError(error.Canceled, c.waitPeerOnline(peer));
+    fake.written.clearRetainingCapacity();
+    try c.unsubscribe(peer);
+    try c.unsubscribe(msgs.hashID("unknown"));
+    try testing.expectEqual(@as(usize, 0), fake.written.items.len);
+}
+
+test "client: unsubscribe write failure propagates after local cleanup" {
+    var frame: [9000]u8 = undefined;
+    var fake: FakeConn = undefined;
+    fake.initInPlace(testing.allocator, authResponseFrame(&frame, "rel://localhost:1"));
+    defer fake.deinit();
+    const c = try FakeClient.connect(testing.allocator, &fake, .{ .peer_id = "a", .token = "" });
+    defer c.destroy();
+    const peer = msgs.hashID("peer-two");
+    try c.subscribe(peer);
+    fake.observed_client = c;
+    fake.fail_write = true;
+    fake.written.clearRetainingCapacity();
+    try testing.expectError(error.WriteFailed, c.unsubscribe(peer));
+    try testing.expectEqual(@as(usize, 1), fake.subscriptions_at_write);
+    try testing.expectEqual(@as(usize, 0), c.subscriptions.items.len);
+    try testing.expectError(error.Canceled, c.waitPeerOnline(peer));
+    const attempts = fake.write_attempts;
+    try c.unsubscribe(peer);
+    try testing.expectEqual(attempts, fake.write_attempts);
+}
+
+test "client: subscribe write failure rolls back locally and destroy frees live subscriptions" {
+    var frame: [9000]u8 = undefined;
+    var fake: FakeConn = undefined;
+    fake.initInPlace(testing.allocator, authResponseFrame(&frame, "rel://localhost:1"));
+    defer fake.deinit();
+    const c = try FakeClient.connect(testing.allocator, &fake, .{ .peer_id = "a", .token = "" });
+    const peer = msgs.hashID("peer-two");
+    fake.fail_write = true;
+    const attempts = fake.write_attempts;
+    try testing.expectError(error.WriteFailed, c.subscribe(peer));
+    try testing.expectEqual(attempts + 1, fake.write_attempts);
+    try testing.expectEqual(@as(usize, 0), c.subscriptions.items.len);
+    fake.fail_write = false;
+    try c.subscribe(peer);
+    try c.subscribe(msgs.hashID("other"));
+    try testing.expectEqual(@as(usize, 2), c.subscriptions.items.len);
+    c.destroy();
+    try testing.expect(fake.destroyed);
+}
