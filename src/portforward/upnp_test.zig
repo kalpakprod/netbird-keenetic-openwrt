@@ -302,3 +302,28 @@ test "HTTP 500 preserves permanent lease fault body" {
     try std.testing.expect(std.mem.indexOf(u8, body, "<s:Fault>") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "<errorCode>725</errorCode>") != null);
 }
+
+test "controlURL scheme regression 0" {
+    var out: [512]u8 = undefined;
+    try std.testing.expectEqualStrings("http://127.0.0.1:54321/ctl/ip2?next=http://127.0.0.2/status", try upnp.resolveControlUrl("http://127.0.0.1:54321/a/desc.xml", "http://127.0.0.1:54321/a/desc.xml", "/ctl/ip2?next=http://127.0.0.2/status", &out));
+}
+
+test "controlURL scheme regression 1" {
+    var out: [512]u8 = undefined;
+    try std.testing.expectEqualStrings("http://127.0.0.1:54321/a/ctl/ip2?next=http://127.0.0.2/status", try upnp.resolveControlUrl("http://127.0.0.1:54321/a/desc.xml", "http://127.0.0.1:54321/a/desc.xml", "ctl/ip2?next=http://127.0.0.2/status", &out));
+}
+
+test "controlURL scheme regression 2" {
+    var out: [512]u8 = undefined;
+    try std.testing.expectEqualStrings("http://127.0.0.1:54321/a/ctl/http://status", try upnp.resolveControlUrl("http://127.0.0.1:54321/a/desc.xml", "http://127.0.0.1:54321/a/desc.xml", "ctl/http://status", &out));
+}
+
+test "controlURL scheme regression 3" {
+    var out: [512]u8 = undefined;
+    try std.testing.expectEqualStrings("http://127.0.0.1:54321/a/ctl/ip2#http://status", try upnp.resolveControlUrl("http://127.0.0.1:54321/a/desc.xml", "http://127.0.0.1:54321/a/desc.xml", "ctl/ip2#http://status", &out));
+}
+
+test "controlURL scheme regression 4" {
+    var out: [512]u8 = undefined;
+    try std.testing.expectEqualStrings("http://127.0.0.2:54321/ip2", try upnp.resolveControlUrl("http://127.0.0.1:54321/a/desc.xml", "http://127.0.0.1:54321/a/desc.xml", "http://127.0.0.2:54321/ip2", &out));
+}
