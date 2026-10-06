@@ -354,5 +354,8 @@ fn truncateReply(arena: std.mem.Allocator, response: *msg.Message, requested: u1
             }
         }
     }
-    response.header.truncated = true;
+    response.header.truncated = original.header.truncated or
+        response.answer.len < original.answer.len or
+        response.ns.len < original.ns.len or
+        response.extra.len < original.extra.len;
 }
