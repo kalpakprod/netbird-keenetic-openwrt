@@ -373,3 +373,15 @@ test "review 187 pending map entry owns unknown bytes" {
         \\}
     );
 }
+
+test "review 187 moved map list owns unknown bytes" {
+    try runGenerated("syntax = \"proto3\"; message Child {} message Parent { map<string, Child> items = 3; string later = 6; }",
+        \\const std = @import("std");
+        \\const c = @import("gen/codec.zig");
+        \\test "later truncation releases moved entry" {
+        \\    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        \\    try std.testing.expectError(error.Truncated, c.Parent.decode(counting.allocator(), &.{26,4,18,2,16,1,50,2,97}));
+        \\    try std.testing.expectEqual(counting.allocated_bytes, counting.freed_bytes);
+        \\}
+    );
+}
