@@ -232,3 +232,41 @@ test "terminal trailers cleanup uses upstream NO_ERROR not cancellation" {
     std.debug.print("terminal trailers deinit RST_STREAM code={d}, upstream expected=0\n", .{code});
     try std.testing.expectEqual(@as(u32, 0), code);
 }
+
+test "DATA END_STREAM without trailers drains messages and releases locally without a cancellation reset" {
+    var wire: [256]u8 = undefined;
+    var n: usize = 0;
+    appendFrame(&wire, &n, 1, 4, 1, &headers);
+    appendFrame(&wire, &n, 0, 1, 1, &.{ 0, 0, 0, 0, 1, 'a', 0, 0, 0, 0, 1, 'b' });
+    var p = Pipe{ .inbound = wire[0..n] };
+    var conn = h2.Conn.init(p.transport());
+    conn.peer_max_concurrent = 1;
+    var call = try grpc.startCall(&conn, std.testing.allocator, "/svc/Stream", "localhost", null, std.testing.io);
+    var alive = true;
+    defer if (alive) call.deinit();
+    // Local send remains open. Upstream handleData(... StreamEnded()) closes with rst=false.
+    const before = p.out_len;
+    try std.testing.expectEqualStrings("a", (try grpc.recvMessage(&call)).?);
+    const processed_out = p.out_len;
+    try std.testing.expectEqualStrings("b", (try grpc.recvMessage(&call)).?);
+    try std.testing.expect((try grpc.recvMessage(&call)) == null);
+    try std.testing.expectEqual(@as(?u32, 13), call.status());
+    try std.testing.expectEqualStrings("server closed the stream without sending trailers", call.statusMessage());
+    try std.testing.expectEqual(n, p.pos);
+    try std.testing.expectEqual(processed_out, p.out_len);
+    try std.testing.expectEqual(h2.StreamState.closed, conn.streams[0].state);
+    // Completion may write flow-control updates, but never RST_STREAM.
+    var scan = before;
+    while (scan < p.out_len) {
+        const len = (@as(usize, p.out[scan]) << 16) | (@as(usize, p.out[scan + 1]) << 8) | p.out[scan + 2];
+        try std.testing.expect(p.out[scan + 3] != 3);
+        scan += 9 + len;
+    }
+    const terminal_out = p.out_len;
+    call.deinit();
+    alive = false;
+    try std.testing.expectEqual(terminal_out, p.out_len);
+    var next = try grpc.startCall(&conn, std.testing.allocator, "/svc/Next", "localhost", null, std.testing.io);
+    defer next.deinit();
+    try std.testing.expectEqual(@as(u32, 3), next.stream_id);
+}
