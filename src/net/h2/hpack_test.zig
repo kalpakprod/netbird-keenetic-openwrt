@@ -322,3 +322,25 @@ test "indexed name survives eviction of its own entry" {
     try d.decodeBlock(&b3, ctx, Collector.emitFn);
     try col.check(&[_][]const u8{"aaa"}, &[_][]const u8{"z"});
 }
+
+// From feat/h2-conn (#97): an earlier dynamic-indexed emit must survive a
+// later evicting add in the same block. Uses this file's Collector.
+test "earlier emitted dynamic entry survives later eviction in same block" {
+    // Table 64 fits one entry (36) but not two (36+37): the second add
+    // evicts and compacts, overwriting arena bytes the first emit aliases.
+    var d = hpack.Decoder.init(64);
+    var col = Collector{};
+    const ctx: ?*anyopaque = @ptrCast(&col);
+    // Block 1: table <- (aaa, x) via literal with incremental indexing.
+    const setup = [_]u8{ 0x40, 0x03, 'a', 'a', 'a', 0x01, 'x' };
+    try d.decodeBlock(&setup, ctx, Collector.emitFn);
+    try col.check(&[_][]const u8{"aaa"}, &[_][]const u8{"x"});
+    // Block 2: indexed (aaa, x), then incremental (bbb, yy) evicting it.
+    col.len = 0;
+    const block = [_]u8{ 0xbe, 0x40, 0x03, 'b', 'b', 'b', 0x02, 'y', 'y' };
+    try d.decodeBlock(&block, ctx, Collector.emitFn);
+    try col.check(
+        &[_][]const u8{ "aaa", "bbb" },
+        &[_][]const u8{ "x", "yy" },
+    );
+}
