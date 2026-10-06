@@ -417,10 +417,22 @@ pub const Client = struct {
         if (m.internal_port != internal) return Error.PortMismatch;
         if (m.result != 0) return Error.PcpError;
         c.updateEpoch(m.epoch);
-        c.external_ip16 = m.external_ip16;
-        c.has_external = true;
+        c.cacheExternalIP(m.external_ip16);
         if (lifetime_s == 0) c.dropNonce(proto, internal);
         return m;
+    }
+
+    /// Port of v0.80 client.go cacheExternalIPLocked. Every 16-byte wire
+    /// address is valid, but unspecified IPv6 and unmapped IPv4 are not cached.
+    fn cacheExternalIP(c: *Client, ip: [16]u8) void {
+        const address = if (isMappedV4(ip)) ip[12..16] else ip[0..16];
+        for (address) |byte| {
+            if (byte != 0) {
+                c.external_ip16 = ip;
+                c.has_external = true;
+                return;
+            }
+        }
     }
 
     /// Port of AddPortMapping (suggested external port = internal).
@@ -443,6 +455,8 @@ pub const Client = struct {
         const eport: u16 = 49152 + @as(u16, std.mem.readInt(u16, &pb, .big)) % (65535 - 49152);
         const m = try c.addPortMapping(proto_udp, eport, 1);
         c.deletePortMapping(proto_udp, eport) catch {};
+        // Upstream client.go:297 returns the raw temporary MAP address even
+        // when unspecified, without turning it into a learned cache entry.
         return m.external_ip16;
     }
 };
