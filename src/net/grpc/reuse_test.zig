@@ -51,8 +51,14 @@ fn nextCallReceivesTrailers(late: u8, await_headers: bool) !void {
     // this a valid trailers-only successful gRPC response on stream 3.
     const response = [_]u8{
         0x88, 0x0f, 0x10, 16,
-        'a', 'p', 'p', 'l', 'i', 'c', 'a', 't', 'i', 'o', 'n', '/', 'g', 'r', 'p', 'c',
-        0, 11, 'g', 'r', 'p', 'c', '-', 's', 't', 'a', 't', 'u', 's', 1, '0',
+        'a',  'p',  'p',  'l',
+        'i',  'c',  'a',  't',
+        'i',  'o',  'n',  '/',
+        'g',  'r',  'p',  'c',
+        0,    11,   'g',  'r',
+        'p',  'c',  '-',  's',
+        't',  'a',  't',  'u',
+        's',  1,    '0',
     };
     var wire: [256]u8 = undefined;
     var n: usize = 0;
@@ -68,8 +74,7 @@ fn nextCallReceivesTrailers(late: u8, await_headers: bool) !void {
     var p = Pipe{ .inbound = wire[0..n] };
     var c = h2.Conn.init(p.transport());
     var canceled = try grpc.startCall(&c, alloc, "/svc/Stream", "localhost", null, std.testing.io);
-    defer canceled.deinit();
-    try c.resetStream(canceled.stream_id, .cancel);
+    canceled.deinit();
     var next = try grpc.startCall(&c, alloc, "/svc/Next", "localhost", null, std.testing.io);
     defer next.deinit();
     try grpc.closeSend(&next);
@@ -112,4 +117,61 @@ test "unknown extension before recvMessage" {
 }
 test "unknown extension before awaitHeaders" {
     try nextCallReceivesTrailers(4, true);
+}
+
+test "nine canceled calls release slots" {
+    var p = Pipe{};
+    var conn = h2.Conn.init(p.transport());
+    for (0..12) |_| {
+        var call = try grpc.startCall(&conn, std.testing.allocator, "/svc/Cancel", "localhost", null, std.testing.io);
+        call.deinit();
+    }
+}
+test "twelve trailers-only calls release open send slots" {
+    const response = [_]u8{ 0x88, 0x0f, 0x10, 16, 'a', 'p', 'p', 'l', 'i', 'c', 'a', 't', 'i', 'o', 'n', '/', 'g', 'r', 'p', 'c', 0, 11, 'g', 'r', 'p', 'c', '-', 's', 't', 'a', 't', 'u', 's', 1, '7' };
+    var wire: [1024]u8 = undefined;
+    var n: usize = 0;
+    for (0..12) |i| appendFrame(&wire, &n, 1, 5, @intCast(2 * i + 1), &response);
+    var p = Pipe{ .inbound = wire[0..n] };
+    var conn = h2.Conn.init(p.transport());
+    for (0..12) |_| {
+        var call = try grpc.startCall(&conn, std.testing.allocator, "/svc/Error", "localhost", null, std.testing.io);
+        defer call.deinit();
+        try std.testing.expect(try grpc.recvMessage(&call) == null);
+        try std.testing.expectEqual(@as(?u32, 7), call.status());
+    }
+}
+
+test "empty DATA before valid message and trailers" {
+    var wire: [256]u8 = undefined;
+    var n: usize = 0;
+    const headers = [_]u8{ 0x88, 0x0f, 0x10, 16, 'a', 'p', 'p', 'l', 'i', 'c', 'a', 't', 'i', 'o', 'n', '/', 'g', 'r', 'p', 'c' };
+    const trailers = [_]u8{ 0, 11, 'g', 'r', 'p', 'c', '-', 's', 't', 'a', 't', 'u', 's', 1, '0' };
+    appendFrame(&wire, &n, 1, 4, 1, &headers);
+    appendFrame(&wire, &n, 0, 0, 1, "");
+    appendFrame(&wire, &n, 0, 0, 1, &.{ 0, 0, 0, 0, 1, 'x' });
+    appendFrame(&wire, &n, 1, 5, 1, &trailers);
+    var p = Pipe{ .inbound = wire[0..n] };
+    var conn = h2.Conn.init(p.transport());
+    var call = try grpc.startCall(&conn, std.testing.allocator, "/svc/Empty", "localhost", null, std.testing.io);
+    defer call.deinit();
+    try grpc.closeSend(&call);
+    try std.testing.expectEqualStrings("x", (try grpc.recvMessage(&call)).?);
+    try std.testing.expect(try grpc.recvMessage(&call) == null);
+    try std.testing.expectEqual(@as(?u32, 0), call.status());
+}
+test "DATA END_STREAM requires trailers" {
+    var wire: [256]u8 = undefined;
+    var n: usize = 0;
+    const headers = [_]u8{ 0x88, 0x0f, 0x10, 16, 'a', 'p', 'p', 'l', 'i', 'c', 'a', 't', 'i', 'o', 'n', '/', 'g', 'r', 'p', 'c' };
+    appendFrame(&wire, &n, 1, 4, 1, &headers);
+    appendFrame(&wire, &n, 0, 1, 1, "");
+    var p = Pipe{ .inbound = wire[0..n] };
+    var conn = h2.Conn.init(p.transport());
+    var call = try grpc.startCall(&conn, std.testing.allocator, "/svc/Empty", "localhost", null, std.testing.io);
+    defer call.deinit();
+    try grpc.closeSend(&call);
+    try std.testing.expect(try grpc.recvMessage(&call) == null);
+    try std.testing.expectEqual(@as(?u32, 13), call.status());
+    try std.testing.expectEqualStrings("server closed the stream without sending trailers", call.statusMessage());
 }
