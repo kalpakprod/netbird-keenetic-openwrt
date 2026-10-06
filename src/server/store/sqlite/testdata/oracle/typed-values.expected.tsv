@@ -1,0 +1,50 @@
+#header	page_size	4096
+#header	page_count	3
+#header	freelist_count	0
+#header	first_freelist_trunk	0
+#header	schema_cookie	2
+#header	user_version	0
+#header	application_id	0
+#header	text_encoding	1
+#master	table	t	t	2	435245415445205441424c452074287629
+#master	table	affinity	affinity	3	435245415445205441424c4520616666696e697479286920494e54454745522c7420544558542c6e204e554d455249432c6220424c4f422c64206461746574696d6529
+row	t	1	I:0
+row	t	2	I:1
+row	t	3	I:-1
+row	t	4	I:127
+row	t	5	I:128
+row	t	6	I:-128
+row	t	7	I:-129
+row	t	8	I:32767
+row	t	9	I:32768
+row	t	10	I:-32768
+row	t	11	I:-32769
+row	t	12	I:8388607
+row	t	13	I:8388608
+row	t	14	I:-8388608
+row	t	15	I:-8388609
+row	t	16	I:2147483647
+row	t	17	I:2147483648
+row	t	18	I:-2147483648
+row	t	19	I:-2147483649
+row	t	20	I:140737488355327
+row	t	21	I:140737488355328
+row	t	22	I:-140737488355328
+row	t	23	I:-140737488355329
+row	t	24	I:9223372036854775807
+row	t	25	I:-9223372036854775808
+row	t	26	N
+row	t	27	T:
+row	t	28	T:d09fd180d0b8d0b2d0b5d18220f09f8c8d2065cc81
+row	t	29	B:
+row	t	30	B:00ff
+row	t	31	I:9223372036854775807
+row	t	32	I:-9223372036854775808
+row	t	33	R:0000000000000000
+row	t	34	R:8000000000000000
+row	t	35	R:0000000000000001
+row	t	36	R:0010000000000000
+row	t	37	R:3ff0000000000001
+row	t	38	R:7fefffffffffffff
+row	t	39	R:bff8000000000000
+row	affinity	1	I:12	T:35	I:3	T:3132	T:323032362d31302d3036
