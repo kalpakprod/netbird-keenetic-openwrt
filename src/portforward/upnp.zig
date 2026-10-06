@@ -219,10 +219,21 @@ pub fn serviceRank(service_type: []const u8) u8 {
     return 0;
 }
 
+// net/url.getScheme: a letter followed by letters, digits, '+', '-', or '.'.
+fn hasUrlScheme(url: []const u8) bool {
+    for (url, 0..) |ch, i| {
+        if (std.ascii.isAlphabetic(ch)) continue;
+        if (ch == ':') return i > 0;
+        if (i > 0 and (std.ascii.isDigit(ch) or ch == '+' or ch == '-' or ch == '.')) continue;
+        return false;
+    }
+    return false;
+}
+
 /// Resolve a controlURL against the description base/location.
 /// Absolute URLs pass through; absolute paths join the location host.
 pub fn resolveControlUrl(base: []const u8, location: []const u8, control: []const u8, out: []u8) Error![]u8 {
-    const absolute = std.mem.indexOf(u8, control, "://") != null;
+    const absolute = hasUrlScheme(control);
     const root = if (absolute) control else if (base.len > 0) base else location;
     const after_scheme = (std.mem.indexOf(u8, root, "://") orelse return Error.BadUrl) + 3;
     const auth_end = after_scheme + (std.mem.indexOfAny(u8, root[after_scheme..], "/?#") orelse root.len - after_scheme);
@@ -235,8 +246,21 @@ pub fn resolveControlUrl(base: []const u8, location: []const u8, control: []cons
     var n: usize = 0;
     var i: usize = 0;
     if (!std.mem.startsWith(u8, path, "/")) {
-        normalized[0] = '/';
-        n = 1;
+        // goupnp prepends '/' only when the reference does not contain ://.
+        // Otherwise Go ResolveReference retains the base path's directory.
+        const root_path_end = std.mem.indexOfAnyPos(u8, root, auth_end, "?#") orelse root.len;
+        const directory_end = if (!absolute and std.mem.indexOf(u8, control, "://") != null)
+            (std.mem.lastIndexOfScalar(u8, root[auth_end..root_path_end], '/') orelse 0) + auth_end + 1
+        else
+            auth_end;
+        if (directory_end > auth_end and directory_end <= root_path_end) {
+            n = directory_end - auth_end;
+            if (n > normalized.len) return Error.NoSpace;
+            @memcpy(normalized[0..n], root[auth_end..directory_end]);
+        } else {
+            normalized[0] = '/';
+            n = 1;
+        }
     }
     // RFC 3986 remove_dot_segments. Query/fragment bytes are never path segments.
     while (i < path.len) {
