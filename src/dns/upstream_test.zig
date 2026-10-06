@@ -24,6 +24,7 @@ const Stub = struct {
     drop_queries: std.atomic.Value(bool) = .init(false), // never answer
     seen: std.atomic.Value(u32) = .init(0),
     port: u16 = 0,
+    ede: std.atomic.Value(u16) = .init(65535),
     wrong_id: std.atomic.Value(bool) = .init(false),
 
     fn start(name: []const u8, ip: [4]u8) !*Stub {
@@ -87,6 +88,17 @@ const Stub = struct {
                 reply.header.rcode = s.rcode_override.load(.acquire);
             } else {
                 reply.header.rcode = 3; // NXDOMAIN
+            }
+            const ede = s.ede.load(.acquire);
+            if (ede != 65535) {
+                const extra = arena.allocator().alloc(msg.RR, 1) catch continue;
+                const opts = arena.allocator().alloc(msg.Option, 1) catch continue;
+                const data = arena.allocator().alloc(u8, 2) catch continue;
+                std.mem.writeInt(u16, data[0..2], ede, .big);
+                opts[0] = .{.code = 15, .data = data};
+                extra[0] = msg.makeOpt(1232, false);
+                extra[0].data = .{.opt = opts};
+                reply.extra = extra;
             }
             const wire = msg.pack(arena.allocator(), &reply, &buf) catch continue;
             const dest: *const linux.sockaddr = @ptrCast(@alignCast(&client));
@@ -205,4 +217,137 @@ test "wrong UDP ID is ignored and next upstream answers after timeout" {
     try std.testing.expectEqual(q.header.id, out.response.header.id);
     try std.testing.expectEqualSlices(u8, &.{203,0,113,10}, &out.response.answer[0].data.a);
     try std.testing.expectEqual(@as(u32, 1), good.seen.load(.acquire));
+}
+
+test "rcode failover and definitive EDE match v080 queryUpstream" {
+    const primary = try Stub.start("ok.example.", .{203,0,113,11});
+    defer primary.shutdown();
+    const fallback = try Stub.start("ok.example.", .{203,0,113,12});
+    defer fallback.shutdown();
+    var up = upstream_mod.Upstream.init(std.testing.allocator);
+    defer up.deinit();
+    try up.addServer(.{.ip4 = .{.bytes = .{127,0,0,1}, .port = primary.port}});
+    try up.addServer(.{.ip4 = .{.bytes = .{127,0,0,1}, .port = fallback.port}});
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const q = try queryOf(arena.allocator(), "ok.example.", .a);
+    for ([_]u16{0,3,2,5}) |rcode| {
+        primary.rcode_override.store(rcode, .release);
+        for (0..25) |code| {
+            primary.ede.store(@intCast(code), .release);
+            const before = fallback.seen.load(.acquire);
+            const out = try up.handler().serve(arena.allocator(), &q, .udp);
+            const definitive = (code >= 1 and code <= 2) or (code >= 5 and code <= 12) or (code >= 15 and code <= 18);
+            const retry = (rcode == 2 or rcode == 5) and !definitive;
+            try std.testing.expectEqual(if (retry) @as(u16,0) else rcode, out.response.header.rcode);
+            try std.testing.expectEqual(before + @as(u32, if (retry) 1 else 0), fallback.seen.load(.acquire));
+            try std.testing.expect(out.response.isEdns0() == null);
+        }
+    }
+}
+
+const DualStub = struct {
+    udp_size: std.atomic.Value(u16) = .init(0),
+    tcp_seen: std.atomic.Value(u32) = .init(0),
+    wrong_tcp_id: std.atomic.Value(bool) = .init(false),
+    oversized_empty: std.atomic.Value(bool) = .init(false),
+    tcp_truncated: std.atomic.Value(bool) = .init(false),
+
+    fn serve(ctx: *anyopaque, arena: std.mem.Allocator, q: *const msg.Message, transport: chain_mod.Transport) chain_mod.ServeError!chain_mod.Outcome {
+        const s: *DualStub = @ptrCast(@alignCast(ctx));
+        if (transport == .udp) {
+            s.udp_size.store(if (q.isEdns0()) |opt| opt.class else 0, .release);
+        } else {
+            _ = s.tcp_seen.fetchAdd(1, .monotonic);
+        }
+        var reply = msg.Message{};
+        reply.setReply(q);
+        if (transport == .udp) {
+            reply.header.truncated = true;
+        } else {
+            if (s.wrong_tcp_id.load(.acquire)) reply.header.id +%= 1;
+            if (s.oversized_empty.load(.acquire)) {
+                const data = try arena.alloc(u8, 600);
+                @memset(data, 0xaa);
+                const extra = try arena.alloc(msg.RR, 1);
+                extra[0] = msg.makeOpt(1232, false);
+                const options = try arena.alloc(msg.Option, 1);
+                options[0] = .{ .code = 65001, .data = data };
+                extra[0].data = .{ .opt = options };
+                reply.extra = extra;
+                reply.header.truncated = s.tcp_truncated.load(.acquire);
+            } else {
+                const records = try arena.alloc(msg.RR, 100);
+                for (records) |*rr| rr.* = .{.name = q.question[0].name, .type = .a, .class = 1, .ttl = 30, .data = .{.a = .{203,0,113,20}}};
+                reply.answer = records;
+            }
+        }
+        return .{.response = reply};
+    }
+};
+
+test "MTU cap and TCP retry truncate to pre-cap client buffer, TCP direct stays full" {
+    const Server = @import("server.zig").Server;
+    var stub = DualStub{};
+    var chain = chain_mod.Chain.init(std.testing.allocator);
+    defer chain.deinit();
+    try chain.add(".", .{.ctx = &stub, .match_subdomains = true, .serveFn = DualStub.serve}, 0);
+    var server = try Server.bind(.{.ip4 = .{.bytes = .{127,0,0,1}, .port = 0}}, &chain);
+    defer server.close();
+    const thread = try std.Thread.spawn(.{}, Server.serveLoop, .{&server});
+    defer { server.requestStop(); thread.join(); }
+    const addr: std.Io.net.IpAddress = .{.ip4 = .{.bytes = .{127,0,0,1}, .port = try server.localPort()}};
+    var up = upstream_mod.Upstream.init(std.testing.allocator);
+    defer up.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var q = try queryOf(a, "ok.example.", .a);
+    const extra = try a.alloc(msg.RR, 1);
+    extra[0] = msg.makeOpt(1400, true);
+    q.extra = extra;
+    const res = try up.exchange(a, addr, &q, .udp, 1000);
+    try std.testing.expectEqual(@as(u16,1212), stub.udp_size.load(.acquire));
+    try std.testing.expectEqual(@as(u16,1400), q.isEdns0().?.class);
+    var buf: [65535]u8 = undefined;
+    const encoded = try msg.pack(a, &res, &buf);
+    try std.testing.expect(encoded.len <= 1400);
+    try std.testing.expect(res.header.truncated);
+    try std.testing.expect(res.answer.len > 0);
+    const direct = try up.exchange(a, addr, &q, .tcp, 1000);
+    try std.testing.expectEqual(@as(usize,100), direct.answer.len);
+    try std.testing.expect(!direct.header.truncated);
+    stub.wrong_tcp_id.store(true, .release);
+    try std.testing.expectError(error.IdMismatch, up.exchange(a, addr, &q, .tcp, 1000));
+}
+
+
+test "truncate preserves TC when question and OPT alone exceed limit" {
+    var stub = DualStub{};
+    stub.oversized_empty.store(true, .release);
+    var chain = chain_mod.Chain.init(std.testing.allocator);
+    defer chain.deinit();
+    try chain.add(".", .{.ctx = &stub, .match_subdomains = true, .serveFn = DualStub.serve}, 0);
+    var server = try @import("server.zig").Server.bind(.{.ip4 = .{.bytes = .{127,0,0,1}, .port = 0}}, &chain);
+    defer server.close();
+    const thread = try std.Thread.spawn(.{}, @import("server.zig").Server.serveLoop, .{&server});
+    defer { server.requestStop(); thread.join(); }
+    var up = upstream_mod.Upstream.init(std.testing.allocator);
+    defer up.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var q = try queryOf(arena.allocator(), "ok.example.", .a);
+    var opt = [_]msg.RR{msg.makeOpt(512, true)};
+    q.extra = &opt;
+    const addr: std.Io.net.IpAddress = .{.ip4 = .{.bytes = .{127,0,0,1}, .port = try server.localPort()}};
+    const ordinary = try up.exchange(arena.allocator(), addr, &q, .udp, 1000);
+    try std.testing.expect(!ordinary.header.truncated);
+    try std.testing.expectEqual(@as(usize, 0), ordinary.answer.len);
+    try std.testing.expectEqual(@as(usize, 0), ordinary.ns.len);
+    try std.testing.expectEqual(@as(usize, 1), ordinary.extra.len);
+    var buf: [65535]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 643), (try msg.pack(arena.allocator(), &ordinary, &buf)).len);
+    stub.tcp_truncated.store(true, .release);
+    const pre_set = try up.exchange(arena.allocator(), addr, &q, .udp, 1000);
+    try std.testing.expect(pre_set.header.truncated);
 }
