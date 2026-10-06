@@ -1,11 +1,11 @@
 // Port of netbird shared/signal/client/grpc.go (v0.80.0), BSD-3-Clause
-// Real local Go server interop. Compile via the harness root to keep src imports
+// Real local Go server interop. Located directly under src so its imports resolve from the source root
 // in one module. No production credentials or external endpoints are accepted.
 const std = @import("std");
-const h2 = @import("../net/h2/conn.zig");
-const signal = @import("client.zig");
-const messages = @import("messages.zig");
-const wgbox = @import("../mgmt/wgbox.zig");
+const h2 = @import("net/h2/conn.zig");
+const signal = @import("signal/client.zig");
+const messages = @import("signal/messages.zig");
+const wgbox = @import("mgmt/wgbox.zig");
 const tio = std.testing.io;
 
 fn getenv(allocator: std.mem.Allocator, key: []const u8) !?[]u8 {
