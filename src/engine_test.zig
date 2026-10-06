@@ -205,16 +205,16 @@ test "down after failed start does not stop again" {
     try std.testing.expectEqual(@as(usize, 0), fake.live);
 }
 
-test "relogin while connected reruns the chain" {
+test "relogin while connected reuses the live chain" {
     var fake = Fake{};
     var e = try engine.Engine.init(std.testing.allocator, fake.service());
     defer e.deinit();
     try e.login("K1");
     try e.login("K2");
     try std.testing.expectEqual(engine.State.connected, e.status().state);
-    try std.testing.expectEqual(@as(usize, 2), fake.login_calls);
-    try std.testing.expectEqual(@as(usize, 2), fake.start_calls);
-    try std.testing.expectEqualStrings("K2", fake.key_buf[0..fake.key_len]);
+    try std.testing.expectEqual(@as(usize, 1), fake.login_calls);
+    try std.testing.expectEqual(@as(usize, 1), fake.start_calls);
+    try std.testing.expectEqualStrings("K1", fake.key_buf[0..fake.key_len]);
 }
 
 test "status formatting names state and message" {
@@ -325,4 +325,68 @@ test "failed start keeps service error when status allocation fails" {
         try std.testing.expectEqual(fa.allocated_bytes, fa.freed_bytes);
     }
     try std.testing.expect(saw_preserved);
+}
+
+fn expectBalance(fake: *const Fake, live: usize) !void {
+    try std.testing.expectEqual(live, fake.live);
+    try std.testing.expect(fake.stop_calls <= fake.start_calls);
+    try std.testing.expectEqual(fake.start_calls - fake.stop_calls, fake.live);
+}
+
+test "successful relogin then down balances live services" {
+    var fake = Fake{};
+    var e = try engine.Engine.init(std.testing.allocator, fake.service());
+    defer e.deinit();
+    try e.login("K1");
+    try e.login("K2");
+    try expectBalance(&fake, 1);
+    try e.down();
+    try expectBalance(&fake, 0);
+    try e.down();
+    try expectBalance(&fake, 0);
+}
+
+test "connected relogin bypasses auth rejection and down balances live services" {
+    var fake = Fake{};
+    var e = try engine.Engine.init(std.testing.allocator, fake.service());
+    defer e.deinit();
+    try e.login("K1");
+    fake.login_err = error.AuthFailed;
+    try e.login("BAD");
+    try expectBalance(&fake, 1);
+    try e.down();
+    try std.testing.expectError(error.AuthFailed, e.login("BAD"));
+    try e.down();
+    try expectBalance(&fake, 0);
+    try e.down();
+    try expectBalance(&fake, 0);
+}
+
+test "relogin after down second start OutOfMemory balances live services" {
+    var fake = Fake{};
+    var e = try engine.Engine.init(std.testing.allocator, fake.service());
+    defer e.deinit();
+    try e.login("K1");
+    try e.down();
+    fake.start_err = error.OutOfMemory;
+    try std.testing.expectError(error.OutOfMemory, e.login("K2"));
+    try expectBalance(&fake, 0);
+    try e.down();
+    try expectBalance(&fake, 0);
+    try e.down();
+    try expectBalance(&fake, 0);
+}
+
+test "missing key relogin then down balances live services" {
+    var fake = Fake{};
+    var e = try engine.Engine.init(std.testing.allocator, fake.service());
+    defer e.deinit();
+    try e.login("K1");
+    try e.login("");
+    try expectBalance(&fake, 1);
+    try e.down();
+    try expectBalance(&fake, 0);
+    try e.down();
+    try expectBalance(&fake, 0);
+    try std.testing.expectEqual(@as(usize, 1), fake.login_calls);
 }
