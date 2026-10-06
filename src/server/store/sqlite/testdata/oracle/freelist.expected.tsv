@@ -1,0 +1,14 @@
+#header	page_size	512
+#header	page_count	622
+#header	freelist_count	605
+#header	first_freelist_trunk	504
+#header	schema_cookie	1
+#header	user_version	0
+#header	application_id	0
+#header	text_encoding	1
+#master	table	t	t	2	435245415445205441424c45207428696420494e5445474552205052494d415259204b45592c7620424c4f4229
+row	t	0	I:0	B:len=1500,sha256=6249da5c681dd8a542b8e38150a3026e02385d590a9dd94f4f83940fd856ee73
+row	t	1	I:1	B:len=1500,sha256=b6f524d4dcd4f01a9cadd967f443875150f2a303fa0284179dafdee9fd9ac8d2
+row	t	2	I:2	B:len=1500,sha256=b8f1c5f438b8030ed229120c672c854f0f1d49272197ba99f33d3318e08de948
+row	t	3	I:3	B:len=1500,sha256=479a5b966ed3b8e58537cadb82d2e3824ea5f5b26e4c74975bdbdca3e16ae2cc
+row	t	4	I:4	B:len=1500,sha256=45f1d2cad8bc75057dd75e460427596ee1db200ebc4bfc8721029bc190807ef1
