@@ -124,7 +124,7 @@ test "generate header carries license by path" {
     var p = try parser.Parser.init(arena.allocator(), sample);
     const file = try p.parse();
     const agpl = try gen.generate(arena.allocator(), &file, "shared/signal/proto/signalexchange.proto");
-    try expectContains(agpl, "AGPL-3.0");
+    try expectContains(agpl, "BSD-3-Clause");
     const bsd = try gen.generate(arena.allocator(), &file, "client/proto/daemon.proto");
     try expectContains(bsd, "BSD-3-Clause");
 }
@@ -271,9 +271,10 @@ test "headers normalize upstream origins and pinned license" {
         "/cache/upstream-v080/shared/signal/proto/signalexchange.proto",
     };
     const origins = [_][]const u8{ "management/proto/job.proto", "signal/proto/job.proto", "relay/proto/job.proto", "combined/proto/job.proto", "shared/management/proto/management.proto", "shared/signal/proto/signalexchange.proto" };
-    for (paths, origins) |path, origin| {
+    const licenses = [_][]const u8{ "AGPL-3.0", "AGPL-3.0", "AGPL-3.0", "AGPL-3.0", "BSD-3-Clause", "BSD-3-Clause" };
+    for (paths, origins, licenses) |path, origin, license| {
         const out = try gen.generate(arena.allocator(), &file, path);
-        const expected = try std.fmt.allocPrint(arena.allocator(), "Port of netbird {s} (v0.80.0), AGPL-3.0", .{origin});
+        const expected = try std.fmt.allocPrint(arena.allocator(), "Port of netbird {s} (v0.80.0), {s}", .{ origin, license });
         try expectContains(out, expected);
         try std.testing.expect(std.mem.indexOf(u8, out, "upstream") == null);
         try std.testing.expect(std.mem.indexOf(u8, out, "/home/") == null);
@@ -384,4 +385,28 @@ test "review 187 moved map list owns unknown bytes" {
         \\    try std.testing.expectEqual(counting.allocated_bytes, counting.freed_bytes);
         \\}
     );
+}
+
+
+test "license headers follow upstream REUSE path boundaries" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var p = try parser.Parser.init(arena.allocator(), "syntax = \"proto3\"; message Empty {}");
+    const file = try p.parse();
+    const cases = .{
+        .{ "shared/management/proto/x.proto", "BSD-3-Clause" },
+        .{ "shared/signal/proto/x.proto", "BSD-3-Clause" },
+        .{ "client/proto/daemon.proto", "BSD-3-Clause" },
+        .{ "management/server/x.proto", "AGPL-3.0" },
+        .{ "signal/x.proto", "AGPL-3.0" },
+        .{ "relay/x.proto", "AGPL-3.0" },
+        .{ "combined/x.proto", "AGPL-3.0" },
+        .{ "proxy/x.proto", "AGPL-3.0" },
+        .{ "sharedmanagement/x.proto", "BSD-3-Clause" },
+    };
+    inline for (cases) |case| {
+        const out = try gen.generate(arena.allocator(), &file, case[0]);
+        const expected = try std.fmt.allocPrint(arena.allocator(), "Port of netbird {s} (v0.80.0), {s}.", .{ case[0], case[1] });
+        try expectContains(out, expected);
+    }
 }
