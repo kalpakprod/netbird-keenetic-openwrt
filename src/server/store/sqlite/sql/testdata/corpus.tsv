@@ -1,0 +1,960 @@
+# id	verdict	statement (escaped)
+0001	ok	SELECT count(*) FROM sqlite_master WHERE type='table' AND name="accounts"
+0002	semantic	CREATE TABLE `accounts` (`id` text,`name` text,PRIMARY KEY (`id`))
+0003	ok	CREATE UNIQUE INDEX `idx_accounts_name` ON `accounts`(`name`)
+0004	ok	SELECT count(*) FROM sqlite_master WHERE type='table' AND name="peers"
+0005	semantic	CREATE TABLE `peers` (`id` text,`account_id` text,`name` text,`data` text,PRIMARY KEY (`id`),CONSTRAINT `fk_peers_account` FOREIGN KEY (`account_id`) REFERENCES `accounts`(`id`) ON DELETE CASCADE)
+0006	ok	CREATE UNIQUE INDEX `idx_peer_name` ON `peers`(`name`)
+0007	ok	CREATE INDEX `idx_peers_account_id` ON `peers`(`account_id`)
+0008	ok	INSERT INTO `accounts` (`id`,`name`) VALUES ("a","account")
+0009	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("0","a","peer0","[""x""]")
+0010	ok	UPDATE `peers` SET `account_id`="a",`name`="peer0",`data`="[""x""]" WHERE `id` = "0"
+0011	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0012	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0013	ok	UPDATE `peers` SET `name`="peer0" WHERE id = "0" RETURNING *
+0014	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0015	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("1","a","peer1","[""x""]")
+0016	ok	UPDATE `peers` SET `account_id`="a",`name`="peer1",`data`="[""x""]" WHERE `id` = "1"
+0017	ok	SELECT * FROM `accounts` WHERE `accounts`.`id` = "a"
+0018	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0019	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0020	ok	UPDATE `peers` SET `name`="peer1" WHERE id = "1" RETURNING *
+0021	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0022	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("2","a","peer2","[""x""]")
+0023	ok	UPDATE `peers` SET `account_id`="a",`name`="peer2",`data`="[""x""]" WHERE `id` = "2"
+0024	ok	SELECT * FROM `accounts` WHERE `accounts`.`id` = "a"
+0025	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0026	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0027	ok	UPDATE `peers` SET `name`="peer2" WHERE id = "2" RETURNING *
+0028	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0029	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("3","a","peer3","[""x""]")
+0030	ok	UPDATE `peers` SET `account_id`="a",`name`="peer3",`data`="[""x""]" WHERE `id` = "3"
+0031	ok	SELECT * FROM `accounts` WHERE `accounts`.`id` = "a"
+0032	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0033	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0034	ok	UPDATE `peers` SET `name`="peer3" WHERE id = "3" RETURNING *
+0035	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0036	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("4","a","peer4","[""x""]")
+0037	ok	UPDATE `peers` SET `account_id`="a",`name`="peer4",`data`="[""x""]" WHERE `id` = "4"
+0038	ok	SELECT * FROM `accounts` WHERE `accounts`.`id` = "a"
+0039	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0040	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0041	ok	UPDATE `peers` SET `name`="peer4" WHERE id = "4" RETURNING *
+0042	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0043	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("5","a","peer5","[""x""]")
+0044	ok	UPDATE `peers` SET `account_id`="a",`name`="peer5",`data`="[""x""]" WHERE `id` = "5"
+0045	ok	SELECT * FROM `accounts` WHERE `accounts`.`id` = "a"
+0046	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0047	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0048	ok	UPDATE `peers` SET `name`="peer5" WHERE id = "5" RETURNING *
+0049	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0050	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("6","a","peer6","[""x""]")
+0051	ok	UPDATE `peers` SET `account_id`="a",`name`="peer6",`data`="[""x""]" WHERE `id` = "6"
+0052	ok	SELECT * FROM `accounts` WHERE `accounts`.`id` = "a"
+0053	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0054	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0055	ok	UPDATE `peers` SET `name`="peer6" WHERE id = "6" RETURNING *
+0056	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0057	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("7","a","peer7","[""x""]")
+0058	ok	UPDATE `peers` SET `account_id`="a",`name`="peer7",`data`="[""x""]" WHERE `id` = "7"
+0059	ok	SELECT * FROM `accounts` WHERE `accounts`.`id` = "a"
+0060	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0061	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0062	ok	UPDATE `peers` SET `name`="peer7" WHERE id = "7" RETURNING *
+0063	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0064	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("8","a","peer8","[""x""]")
+0065	ok	UPDATE `peers` SET `account_id`="a",`name`="peer8",`data`="[""x""]" WHERE `id` = "8"
+0066	ok	SELECT * FROM `accounts` WHERE `accounts`.`id` = "a"
+0067	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0068	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0069	ok	UPDATE `peers` SET `name`="peer8" WHERE id = "8" RETURNING *
+0070	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0071	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("9","a","peer9","[""x""]")
+0072	ok	UPDATE `peers` SET `account_id`="a",`name`="peer9",`data`="[""x""]" WHERE `id` = "9"
+0073	ok	SELECT * FROM `accounts` WHERE `accounts`.`id` = "a"
+0074	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0075	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0076	ok	UPDATE `peers` SET `name`="peer9" WHERE id = "9" RETURNING *
+0077	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0078	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("10","a","peer10","[""x""]")
+0079	ok	UPDATE `peers` SET `account_id`="a",`name`="peer10",`data`="[""x""]" WHERE `id` = "10"
+0080	ok	SELECT * FROM `accounts` WHERE `accounts`.`id` = "a"
+0081	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0082	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0083	ok	UPDATE `peers` SET `name`="peer10" WHERE id = "10" RETURNING *
+0084	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0085	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("11","a","peer11","[""x""]")
+0086	ok	UPDATE `peers` SET `account_id`="a",`name`="peer11",`data`="[""x""]" WHERE `id` = "11"
+0087	ok	SELECT * FROM `accounts` WHERE `accounts`.`id` = "a"
+0088	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0089	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0090	ok	UPDATE `peers` SET `name`="peer11" WHERE id = "11" RETURNING *
+0091	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0092	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("12","a","peer12","[""x""]")
+0093	ok	UPDATE `peers` SET `account_id`="a",`name`="peer12",`data`="[""x""]" WHERE `id` = "12"
+0094	ok	SELECT * FROM `accounts` WHERE `accounts`.`id` = "a"
+0095	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0096	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0097	ok	UPDATE `peers` SET `name`="peer12" WHERE id = "12" RETURNING *
+0098	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0099	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("13","a","peer13","[""x""]")
+0100	ok	UPDATE `peers` SET `account_id`="a",`name`="peer13",`data`="[""x""]" WHERE `id` = "13"
+0101	ok	SELECT * FROM `accounts` WHERE `accounts`.`id` = "a"
+0102	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0103	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0104	ok	UPDATE `peers` SET `name`="peer13" WHERE id = "13" RETURNING *
+0105	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0106	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("14","a","peer14","[""x""]")
+0107	ok	UPDATE `peers` SET `account_id`="a",`name`="peer14",`data`="[""x""]" WHERE `id` = "14"
+0108	ok	SELECT * FROM `accounts` WHERE `accounts`.`id` = "a"
+0109	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0110	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0111	ok	UPDATE `peers` SET `name`="peer14" WHERE id = "14" RETURNING *
+0112	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0113	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("15","a","peer15","[""x""]")
+0114	ok	UPDATE `peers` SET `account_id`="a",`name`="peer15",`data`="[""x""]" WHERE `id` = "15"
+0115	ok	SELECT * FROM `accounts` WHERE `accounts`.`id` = "a"
+0116	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0117	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0118	ok	UPDATE `peers` SET `name`="peer15" WHERE id = "15" RETURNING *
+0119	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0120	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("16","a","peer16","[""x""]")
+0121	ok	UPDATE `peers` SET `account_id`="a",`name`="peer16",`data`="[""x""]" WHERE `id` = "16"
+0122	ok	SELECT * FROM `accounts` WHERE `accounts`.`id` = "a"
+0123	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0124	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0125	ok	UPDATE `peers` SET `name`="peer16" WHERE id = "16" RETURNING *
+0126	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0127	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("17","a","peer17","[""x""]")
+0128	ok	UPDATE `peers` SET `account_id`="a",`name`="peer17",`data`="[""x""]" WHERE `id` = "17"
+0129	ok	SELECT * FROM `accounts` WHERE `accounts`.`id` = "a"
+0130	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0131	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0132	ok	UPDATE `peers` SET `name`="peer17" WHERE id = "17" RETURNING *
+0133	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0134	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("18","a","peer18","[""x""]")
+0135	ok	UPDATE `peers` SET `account_id`="a",`name`="peer18",`data`="[""x""]" WHERE `id` = "18"
+0136	ok	SELECT * FROM `accounts` WHERE `accounts`.`id` = "a"
+0137	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0138	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0139	ok	UPDATE `peers` SET `name`="peer18" WHERE id = "18" RETURNING *
+0140	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0141	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("19","a","peer19","[""x""]")
+0142	ok	UPDATE `peers` SET `account_id`="a",`name`="peer19",`data`="[""x""]" WHERE `id` = "19"
+0143	ok	SELECT * FROM `accounts` WHERE `accounts`.`id` = "a"
+0144	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0145	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0146	ok	UPDATE `peers` SET `name`="peer19" WHERE id = "19" RETURNING *
+0147	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0148	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("20","a","peer20","[""x""]")
+0149	ok	UPDATE `peers` SET `account_id`="a",`name`="peer20",`data`="[""x""]" WHERE `id` = "20"
+0150	ok	SELECT * FROM `accounts` WHERE `accounts`.`id` = "a"
+0151	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0152	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0153	ok	UPDATE `peers` SET `name`="peer20" WHERE id = "20" RETURNING *
+0154	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0155	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("21","a","peer21","[""x""]")
+0156	ok	UPDATE `peers` SET `account_id`="a",`name`="peer21",`data`="[""x""]" WHERE `id` = "21"
+0157	ok	SELECT * FROM `accounts` WHERE `accounts`.`id` = "a"
+0158	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0159	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0160	ok	UPDATE `peers` SET `name`="peer21" WHERE id = "21" RETURNING *
+0161	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0162	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("22","a","peer22","[""x""]")
+0163	ok	UPDATE `peers` SET `account_id`="a",`name`="peer22",`data`="[""x""]" WHERE `id` = "22"
+0164	ok	SELECT * FROM `accounts` WHERE `accounts`.`id` = "a"
+0165	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0166	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0167	ok	UPDATE `peers` SET `name`="peer22" WHERE id = "22" RETURNING *
+0168	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0169	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("23","a","peer23","[""x""]")
+0170	ok	UPDATE `peers` SET `account_id`="a",`name`="peer23",`data`="[""x""]" WHERE `id` = "23"
+0171	ok	SELECT * FROM `accounts` WHERE `accounts`.`id` = "a"
+0172	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0173	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0174	ok	UPDATE `peers` SET `name`="peer23" WHERE id = "23" RETURNING *
+0175	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0176	ok	INSERT INTO `peers` (`id`,`account_id`,`name`,`data`) VALUES ("24","a","peer24","[""x""]")
+0177	ok	UPDATE `peers` SET `account_id`="a",`name`="peer24",`data`="[""x""]" WHERE `id` = "24"
+0178	ok	SELECT * FROM `accounts` WHERE `accounts`.`id` = "a"
+0179	ok	SELECT * FROM `peers` WHERE account_id = "a" OR name = "x" ORDER BY name DESC LIMIT 3 OFFSET 1
+0180	ok	SELECT count(*) FROM `peers` WHERE account_id = "a"
+0181	ok	UPDATE `peers` SET `name`="peer24" WHERE id = "24" RETURNING *
+0182	ok	DELETE FROM `peers` WHERE id = "missing" RETURNING *
+0183	ok	SELECT 1 OR 2 OR 3
+0184	ok	SELECT 1 OR 2 AND 3
+0185	ok	SELECT 1 OR 2 = 3
+0186	ok	SELECT 1 OR 2 == 3
+0187	ok	SELECT 1 OR 2 != 3
+0188	ok	SELECT 1 OR 2 <> 3
+0189	ok	SELECT 1 OR 2 IS 3
+0190	ok	SELECT 1 OR 2 IS NOT 3
+0191	ok	SELECT 1 OR 2 IS DISTINCT FROM 3
+0192	ok	SELECT 1 OR 2 < 3
+0193	ok	SELECT 1 OR 2 <= 3
+0194	ok	SELECT 1 OR 2 > 3
+0195	ok	SELECT 1 OR 2 >= 3
+0196	ok	SELECT 1 OR 2 & 3
+0197	ok	SELECT 1 OR 2 | 3
+0198	ok	SELECT 1 OR 2 << 3
+0199	ok	SELECT 1 OR 2 >> 3
+0200	ok	SELECT 1 OR 2 + 3
+0201	ok	SELECT 1 OR 2 - 3
+0202	ok	SELECT 1 OR 2 * 3
+0203	ok	SELECT 1 OR 2 / 3
+0204	ok	SELECT 1 OR 2 % 3
+0205	ok	SELECT 1 OR 2 || 3
+0206	ok	SELECT 1 AND 2 OR 3
+0207	ok	SELECT 1 AND 2 AND 3
+0208	ok	SELECT 1 AND 2 = 3
+0209	ok	SELECT 1 AND 2 == 3
+0210	ok	SELECT 1 AND 2 != 3
+0211	ok	SELECT 1 AND 2 <> 3
+0212	ok	SELECT 1 AND 2 IS 3
+0213	ok	SELECT 1 AND 2 IS NOT 3
+0214	ok	SELECT 1 AND 2 IS DISTINCT FROM 3
+0215	ok	SELECT 1 AND 2 < 3
+0216	ok	SELECT 1 AND 2 <= 3
+0217	ok	SELECT 1 AND 2 > 3
+0218	ok	SELECT 1 AND 2 >= 3
+0219	ok	SELECT 1 AND 2 & 3
+0220	ok	SELECT 1 AND 2 | 3
+0221	ok	SELECT 1 AND 2 << 3
+0222	ok	SELECT 1 AND 2 >> 3
+0223	ok	SELECT 1 AND 2 + 3
+0224	ok	SELECT 1 AND 2 - 3
+0225	ok	SELECT 1 AND 2 * 3
+0226	ok	SELECT 1 AND 2 / 3
+0227	ok	SELECT 1 AND 2 % 3
+0228	ok	SELECT 1 AND 2 || 3
+0229	ok	SELECT 1 = 2 OR 3
+0230	ok	SELECT 1 = 2 AND 3
+0231	ok	SELECT 1 = 2 = 3
+0232	ok	SELECT 1 = 2 == 3
+0233	ok	SELECT 1 = 2 != 3
+0234	ok	SELECT 1 = 2 <> 3
+0235	ok	SELECT 1 = 2 IS 3
+0236	ok	SELECT 1 = 2 IS NOT 3
+0237	ok	SELECT 1 = 2 IS DISTINCT FROM 3
+0238	ok	SELECT 1 = 2 < 3
+0239	ok	SELECT 1 = 2 <= 3
+0240	ok	SELECT 1 = 2 > 3
+0241	ok	SELECT 1 = 2 >= 3
+0242	ok	SELECT 1 = 2 & 3
+0243	ok	SELECT 1 = 2 | 3
+0244	ok	SELECT 1 = 2 << 3
+0245	ok	SELECT 1 = 2 >> 3
+0246	ok	SELECT 1 = 2 + 3
+0247	ok	SELECT 1 = 2 - 3
+0248	ok	SELECT 1 = 2 * 3
+0249	ok	SELECT 1 = 2 / 3
+0250	ok	SELECT 1 = 2 % 3
+0251	ok	SELECT 1 = 2 || 3
+0252	ok	SELECT 1 == 2 OR 3
+0253	ok	SELECT 1 == 2 AND 3
+0254	ok	SELECT 1 == 2 = 3
+0255	ok	SELECT 1 == 2 == 3
+0256	ok	SELECT 1 == 2 != 3
+0257	ok	SELECT 1 == 2 <> 3
+0258	ok	SELECT 1 == 2 IS 3
+0259	ok	SELECT 1 == 2 IS NOT 3
+0260	ok	SELECT 1 == 2 IS DISTINCT FROM 3
+0261	ok	SELECT 1 == 2 < 3
+0262	ok	SELECT 1 == 2 <= 3
+0263	ok	SELECT 1 == 2 > 3
+0264	ok	SELECT 1 == 2 >= 3
+0265	ok	SELECT 1 == 2 & 3
+0266	ok	SELECT 1 == 2 | 3
+0267	ok	SELECT 1 == 2 << 3
+0268	ok	SELECT 1 == 2 >> 3
+0269	ok	SELECT 1 == 2 + 3
+0270	ok	SELECT 1 == 2 - 3
+0271	ok	SELECT 1 == 2 * 3
+0272	ok	SELECT 1 == 2 / 3
+0273	ok	SELECT 1 == 2 % 3
+0274	ok	SELECT 1 == 2 || 3
+0275	ok	SELECT 1 != 2 OR 3
+0276	ok	SELECT 1 != 2 AND 3
+0277	ok	SELECT 1 != 2 = 3
+0278	ok	SELECT 1 != 2 == 3
+0279	ok	SELECT 1 != 2 != 3
+0280	ok	SELECT 1 != 2 <> 3
+0281	ok	SELECT 1 != 2 IS 3
+0282	ok	SELECT 1 != 2 IS NOT 3
+0283	ok	SELECT 1 != 2 IS DISTINCT FROM 3
+0284	ok	SELECT 1 != 2 < 3
+0285	ok	SELECT 1 != 2 <= 3
+0286	ok	SELECT 1 != 2 > 3
+0287	ok	SELECT 1 != 2 >= 3
+0288	ok	SELECT 1 != 2 & 3
+0289	ok	SELECT 1 != 2 | 3
+0290	ok	SELECT 1 != 2 << 3
+0291	ok	SELECT 1 != 2 >> 3
+0292	ok	SELECT 1 != 2 + 3
+0293	ok	SELECT 1 != 2 - 3
+0294	ok	SELECT 1 != 2 * 3
+0295	ok	SELECT 1 != 2 / 3
+0296	ok	SELECT 1 != 2 % 3
+0297	ok	SELECT 1 != 2 || 3
+0298	ok	SELECT 1 <> 2 OR 3
+0299	ok	SELECT 1 <> 2 AND 3
+0300	ok	SELECT 1 <> 2 = 3
+0301	ok	SELECT 1 <> 2 == 3
+0302	ok	SELECT 1 <> 2 != 3
+0303	ok	SELECT 1 <> 2 <> 3
+0304	ok	SELECT 1 <> 2 IS 3
+0305	ok	SELECT 1 <> 2 IS NOT 3
+0306	ok	SELECT 1 <> 2 IS DISTINCT FROM 3
+0307	ok	SELECT 1 <> 2 < 3
+0308	ok	SELECT 1 <> 2 <= 3
+0309	ok	SELECT 1 <> 2 > 3
+0310	ok	SELECT 1 <> 2 >= 3
+0311	ok	SELECT 1 <> 2 & 3
+0312	ok	SELECT 1 <> 2 | 3
+0313	ok	SELECT 1 <> 2 << 3
+0314	ok	SELECT 1 <> 2 >> 3
+0315	ok	SELECT 1 <> 2 + 3
+0316	ok	SELECT 1 <> 2 - 3
+0317	ok	SELECT 1 <> 2 * 3
+0318	ok	SELECT 1 <> 2 / 3
+0319	ok	SELECT 1 <> 2 % 3
+0320	ok	SELECT 1 <> 2 || 3
+0321	ok	SELECT 1 IS 2 OR 3
+0322	ok	SELECT 1 IS 2 AND 3
+0323	ok	SELECT 1 IS 2 = 3
+0324	ok	SELECT 1 IS 2 == 3
+0325	ok	SELECT 1 IS 2 != 3
+0326	ok	SELECT 1 IS 2 <> 3
+0327	ok	SELECT 1 IS 2 IS 3
+0328	ok	SELECT 1 IS 2 IS NOT 3
+0329	ok	SELECT 1 IS 2 IS DISTINCT FROM 3
+0330	ok	SELECT 1 IS 2 < 3
+0331	ok	SELECT 1 IS 2 <= 3
+0332	ok	SELECT 1 IS 2 > 3
+0333	ok	SELECT 1 IS 2 >= 3
+0334	ok	SELECT 1 IS 2 & 3
+0335	ok	SELECT 1 IS 2 | 3
+0336	ok	SELECT 1 IS 2 << 3
+0337	ok	SELECT 1 IS 2 >> 3
+0338	ok	SELECT 1 IS 2 + 3
+0339	ok	SELECT 1 IS 2 - 3
+0340	ok	SELECT 1 IS 2 * 3
+0341	ok	SELECT 1 IS 2 / 3
+0342	ok	SELECT 1 IS 2 % 3
+0343	ok	SELECT 1 IS 2 || 3
+0344	ok	SELECT 1 IS NOT 2 OR 3
+0345	ok	SELECT 1 IS NOT 2 AND 3
+0346	ok	SELECT 1 IS NOT 2 = 3
+0347	ok	SELECT 1 IS NOT 2 == 3
+0348	ok	SELECT 1 IS NOT 2 != 3
+0349	ok	SELECT 1 IS NOT 2 <> 3
+0350	ok	SELECT 1 IS NOT 2 IS 3
+0351	ok	SELECT 1 IS NOT 2 IS NOT 3
+0352	ok	SELECT 1 IS NOT 2 IS DISTINCT FROM 3
+0353	ok	SELECT 1 IS NOT 2 < 3
+0354	ok	SELECT 1 IS NOT 2 <= 3
+0355	ok	SELECT 1 IS NOT 2 > 3
+0356	ok	SELECT 1 IS NOT 2 >= 3
+0357	ok	SELECT 1 IS NOT 2 & 3
+0358	ok	SELECT 1 IS NOT 2 | 3
+0359	ok	SELECT 1 IS NOT 2 << 3
+0360	ok	SELECT 1 IS NOT 2 >> 3
+0361	ok	SELECT 1 IS NOT 2 + 3
+0362	ok	SELECT 1 IS NOT 2 - 3
+0363	ok	SELECT 1 IS NOT 2 * 3
+0364	ok	SELECT 1 IS NOT 2 / 3
+0365	ok	SELECT 1 IS NOT 2 % 3
+0366	ok	SELECT 1 IS NOT 2 || 3
+0367	ok	SELECT 1 IS DISTINCT FROM 2 OR 3
+0368	ok	SELECT 1 IS DISTINCT FROM 2 AND 3
+0369	ok	SELECT 1 IS DISTINCT FROM 2 = 3
+0370	ok	SELECT 1 IS DISTINCT FROM 2 == 3
+0371	ok	SELECT 1 IS DISTINCT FROM 2 != 3
+0372	ok	SELECT 1 IS DISTINCT FROM 2 <> 3
+0373	ok	SELECT 1 IS DISTINCT FROM 2 IS 3
+0374	ok	SELECT 1 IS DISTINCT FROM 2 IS NOT 3
+0375	ok	SELECT 1 IS DISTINCT FROM 2 IS DISTINCT FROM 3
+0376	ok	SELECT 1 IS DISTINCT FROM 2 < 3
+0377	ok	SELECT 1 IS DISTINCT FROM 2 <= 3
+0378	ok	SELECT 1 IS DISTINCT FROM 2 > 3
+0379	ok	SELECT 1 IS DISTINCT FROM 2 >= 3
+0380	ok	SELECT 1 IS DISTINCT FROM 2 & 3
+0381	ok	SELECT 1 IS DISTINCT FROM 2 | 3
+0382	ok	SELECT 1 IS DISTINCT FROM 2 << 3
+0383	ok	SELECT 1 IS DISTINCT FROM 2 >> 3
+0384	ok	SELECT 1 IS DISTINCT FROM 2 + 3
+0385	ok	SELECT 1 IS DISTINCT FROM 2 - 3
+0386	ok	SELECT 1 IS DISTINCT FROM 2 * 3
+0387	ok	SELECT 1 IS DISTINCT FROM 2 / 3
+0388	ok	SELECT 1 IS DISTINCT FROM 2 % 3
+0389	ok	SELECT 1 IS DISTINCT FROM 2 || 3
+0390	ok	SELECT 1 < 2 OR 3
+0391	ok	SELECT 1 < 2 AND 3
+0392	ok	SELECT 1 < 2 = 3
+0393	ok	SELECT 1 < 2 == 3
+0394	ok	SELECT 1 < 2 != 3
+0395	ok	SELECT 1 < 2 <> 3
+0396	ok	SELECT 1 < 2 IS 3
+0397	ok	SELECT 1 < 2 IS NOT 3
+0398	ok	SELECT 1 < 2 IS DISTINCT FROM 3
+0399	ok	SELECT 1 < 2 < 3
+0400	ok	SELECT 1 < 2 <= 3
+0401	ok	SELECT 1 < 2 > 3
+0402	ok	SELECT 1 < 2 >= 3
+0403	ok	SELECT 1 < 2 & 3
+0404	ok	SELECT 1 < 2 | 3
+0405	ok	SELECT 1 < 2 << 3
+0406	ok	SELECT 1 < 2 >> 3
+0407	ok	SELECT 1 < 2 + 3
+0408	ok	SELECT 1 < 2 - 3
+0409	ok	SELECT 1 < 2 * 3
+0410	ok	SELECT 1 < 2 / 3
+0411	ok	SELECT 1 < 2 % 3
+0412	ok	SELECT 1 < 2 || 3
+0413	ok	SELECT 1 <= 2 OR 3
+0414	ok	SELECT 1 <= 2 AND 3
+0415	ok	SELECT 1 <= 2 = 3
+0416	ok	SELECT 1 <= 2 == 3
+0417	ok	SELECT 1 <= 2 != 3
+0418	ok	SELECT 1 <= 2 <> 3
+0419	ok	SELECT 1 <= 2 IS 3
+0420	ok	SELECT 1 <= 2 IS NOT 3
+0421	ok	SELECT 1 <= 2 IS DISTINCT FROM 3
+0422	ok	SELECT 1 <= 2 < 3
+0423	ok	SELECT 1 <= 2 <= 3
+0424	ok	SELECT 1 <= 2 > 3
+0425	ok	SELECT 1 <= 2 >= 3
+0426	ok	SELECT 1 <= 2 & 3
+0427	ok	SELECT 1 <= 2 | 3
+0428	ok	SELECT 1 <= 2 << 3
+0429	ok	SELECT 1 <= 2 >> 3
+0430	ok	SELECT 1 <= 2 + 3
+0431	ok	SELECT 1 <= 2 - 3
+0432	ok	SELECT 1 <= 2 * 3
+0433	ok	SELECT 1 <= 2 / 3
+0434	ok	SELECT 1 <= 2 % 3
+0435	ok	SELECT 1 <= 2 || 3
+0436	ok	SELECT 1 > 2 OR 3
+0437	ok	SELECT 1 > 2 AND 3
+0438	ok	SELECT 1 > 2 = 3
+0439	ok	SELECT 1 > 2 == 3
+0440	ok	SELECT 1 > 2 != 3
+0441	ok	SELECT 1 > 2 <> 3
+0442	ok	SELECT 1 > 2 IS 3
+0443	ok	SELECT 1 > 2 IS NOT 3
+0444	ok	SELECT 1 > 2 IS DISTINCT FROM 3
+0445	ok	SELECT 1 > 2 < 3
+0446	ok	SELECT 1 > 2 <= 3
+0447	ok	SELECT 1 > 2 > 3
+0448	ok	SELECT 1 > 2 >= 3
+0449	ok	SELECT 1 > 2 & 3
+0450	ok	SELECT 1 > 2 | 3
+0451	ok	SELECT 1 > 2 << 3
+0452	ok	SELECT 1 > 2 >> 3
+0453	ok	SELECT 1 > 2 + 3
+0454	ok	SELECT 1 > 2 - 3
+0455	ok	SELECT 1 > 2 * 3
+0456	ok	SELECT 1 > 2 / 3
+0457	ok	SELECT 1 > 2 % 3
+0458	ok	SELECT 1 > 2 || 3
+0459	ok	SELECT 1 >= 2 OR 3
+0460	ok	SELECT 1 >= 2 AND 3
+0461	ok	SELECT 1 >= 2 = 3
+0462	ok	SELECT 1 >= 2 == 3
+0463	ok	SELECT 1 >= 2 != 3
+0464	ok	SELECT 1 >= 2 <> 3
+0465	ok	SELECT 1 >= 2 IS 3
+0466	ok	SELECT 1 >= 2 IS NOT 3
+0467	ok	SELECT 1 >= 2 IS DISTINCT FROM 3
+0468	ok	SELECT 1 >= 2 < 3
+0469	ok	SELECT 1 >= 2 <= 3
+0470	ok	SELECT 1 >= 2 > 3
+0471	ok	SELECT 1 >= 2 >= 3
+0472	ok	SELECT 1 >= 2 & 3
+0473	ok	SELECT 1 >= 2 | 3
+0474	ok	SELECT 1 >= 2 << 3
+0475	ok	SELECT 1 >= 2 >> 3
+0476	ok	SELECT 1 >= 2 + 3
+0477	ok	SELECT 1 >= 2 - 3
+0478	ok	SELECT 1 >= 2 * 3
+0479	ok	SELECT 1 >= 2 / 3
+0480	ok	SELECT 1 >= 2 % 3
+0481	ok	SELECT 1 >= 2 || 3
+0482	ok	SELECT 1 & 2 OR 3
+0483	ok	SELECT 1 & 2 AND 3
+0484	ok	SELECT 1 & 2 = 3
+0485	ok	SELECT 1 & 2 == 3
+0486	ok	SELECT 1 & 2 != 3
+0487	ok	SELECT 1 & 2 <> 3
+0488	ok	SELECT 1 & 2 IS 3
+0489	ok	SELECT 1 & 2 IS NOT 3
+0490	ok	SELECT 1 & 2 IS DISTINCT FROM 3
+0491	ok	SELECT 1 & 2 < 3
+0492	ok	SELECT 1 & 2 <= 3
+0493	ok	SELECT 1 & 2 > 3
+0494	ok	SELECT 1 & 2 >= 3
+0495	ok	SELECT 1 & 2 & 3
+0496	ok	SELECT 1 & 2 | 3
+0497	ok	SELECT 1 & 2 << 3
+0498	ok	SELECT 1 & 2 >> 3
+0499	ok	SELECT 1 & 2 + 3
+0500	ok	SELECT 1 & 2 - 3
+0501	ok	SELECT 1 & 2 * 3
+0502	ok	SELECT 1 & 2 / 3
+0503	ok	SELECT 1 & 2 % 3
+0504	ok	SELECT 1 & 2 || 3
+0505	ok	SELECT 1 | 2 OR 3
+0506	ok	SELECT 1 | 2 AND 3
+0507	ok	SELECT 1 | 2 = 3
+0508	ok	SELECT 1 | 2 == 3
+0509	ok	SELECT 1 | 2 != 3
+0510	ok	SELECT 1 | 2 <> 3
+0511	ok	SELECT 1 | 2 IS 3
+0512	ok	SELECT 1 | 2 IS NOT 3
+0513	ok	SELECT 1 | 2 IS DISTINCT FROM 3
+0514	ok	SELECT 1 | 2 < 3
+0515	ok	SELECT 1 | 2 <= 3
+0516	ok	SELECT 1 | 2 > 3
+0517	ok	SELECT 1 | 2 >= 3
+0518	ok	SELECT 1 | 2 & 3
+0519	ok	SELECT 1 | 2 | 3
+0520	ok	SELECT 1 | 2 << 3
+0521	ok	SELECT 1 | 2 >> 3
+0522	ok	SELECT 1 | 2 + 3
+0523	ok	SELECT 1 | 2 - 3
+0524	ok	SELECT 1 | 2 * 3
+0525	ok	SELECT 1 | 2 / 3
+0526	ok	SELECT 1 | 2 % 3
+0527	ok	SELECT 1 | 2 || 3
+0528	ok	SELECT 1 << 2 OR 3
+0529	ok	SELECT 1 << 2 AND 3
+0530	ok	SELECT 1 << 2 = 3
+0531	ok	SELECT 1 << 2 == 3
+0532	ok	SELECT 1 << 2 != 3
+0533	ok	SELECT 1 << 2 <> 3
+0534	ok	SELECT 1 << 2 IS 3
+0535	ok	SELECT 1 << 2 IS NOT 3
+0536	ok	SELECT 1 << 2 IS DISTINCT FROM 3
+0537	ok	SELECT 1 << 2 < 3
+0538	ok	SELECT 1 << 2 <= 3
+0539	ok	SELECT 1 << 2 > 3
+0540	ok	SELECT 1 << 2 >= 3
+0541	ok	SELECT 1 << 2 & 3
+0542	ok	SELECT 1 << 2 | 3
+0543	ok	SELECT 1 << 2 << 3
+0544	ok	SELECT 1 << 2 >> 3
+0545	ok	SELECT 1 << 2 + 3
+0546	ok	SELECT 1 << 2 - 3
+0547	ok	SELECT 1 << 2 * 3
+0548	ok	SELECT 1 << 2 / 3
+0549	ok	SELECT 1 << 2 % 3
+0550	ok	SELECT 1 << 2 || 3
+0551	ok	SELECT 1 >> 2 OR 3
+0552	ok	SELECT 1 >> 2 AND 3
+0553	ok	SELECT 1 >> 2 = 3
+0554	ok	SELECT 1 >> 2 == 3
+0555	ok	SELECT 1 >> 2 != 3
+0556	ok	SELECT 1 >> 2 <> 3
+0557	ok	SELECT 1 >> 2 IS 3
+0558	ok	SELECT 1 >> 2 IS NOT 3
+0559	ok	SELECT 1 >> 2 IS DISTINCT FROM 3
+0560	ok	SELECT 1 >> 2 < 3
+0561	ok	SELECT 1 >> 2 <= 3
+0562	ok	SELECT 1 >> 2 > 3
+0563	ok	SELECT 1 >> 2 >= 3
+0564	ok	SELECT 1 >> 2 & 3
+0565	ok	SELECT 1 >> 2 | 3
+0566	ok	SELECT 1 >> 2 << 3
+0567	ok	SELECT 1 >> 2 >> 3
+0568	ok	SELECT 1 >> 2 + 3
+0569	ok	SELECT 1 >> 2 - 3
+0570	ok	SELECT 1 >> 2 * 3
+0571	ok	SELECT 1 >> 2 / 3
+0572	ok	SELECT 1 >> 2 % 3
+0573	ok	SELECT 1 >> 2 || 3
+0574	ok	SELECT 1 + 2 OR 3
+0575	ok	SELECT 1 + 2 AND 3
+0576	ok	SELECT 1 + 2 = 3
+0577	ok	SELECT 1 + 2 == 3
+0578	ok	SELECT 1 + 2 != 3
+0579	ok	SELECT 1 + 2 <> 3
+0580	ok	SELECT 1 + 2 IS 3
+0581	ok	SELECT 1 + 2 IS NOT 3
+0582	ok	SELECT 1 + 2 IS DISTINCT FROM 3
+0583	ok	SELECT 1 + 2 < 3
+0584	ok	SELECT 1 + 2 <= 3
+0585	ok	SELECT 1 + 2 > 3
+0586	ok	SELECT 1 + 2 >= 3
+0587	ok	SELECT 1 + 2 & 3
+0588	ok	SELECT 1 + 2 | 3
+0589	ok	SELECT 1 + 2 << 3
+0590	ok	SELECT 1 + 2 >> 3
+0591	ok	SELECT 1 + 2 + 3
+0592	ok	SELECT 1 + 2 - 3
+0593	ok	SELECT 1 + 2 * 3
+0594	ok	SELECT 1 + 2 / 3
+0595	ok	SELECT 1 + 2 % 3
+0596	ok	SELECT 1 + 2 || 3
+0597	ok	SELECT 1 - 2 OR 3
+0598	ok	SELECT 1 - 2 AND 3
+0599	ok	SELECT 1 - 2 = 3
+0600	ok	SELECT 1 - 2 == 3
+0601	ok	SELECT 1 - 2 != 3
+0602	ok	SELECT 1 - 2 <> 3
+0603	ok	SELECT 1 - 2 IS 3
+0604	ok	SELECT 1 - 2 IS NOT 3
+0605	ok	SELECT 1 - 2 IS DISTINCT FROM 3
+0606	ok	SELECT 1 - 2 < 3
+0607	ok	SELECT 1 - 2 <= 3
+0608	ok	SELECT 1 - 2 > 3
+0609	ok	SELECT 1 - 2 >= 3
+0610	ok	SELECT 1 - 2 & 3
+0611	ok	SELECT 1 - 2 | 3
+0612	ok	SELECT 1 - 2 << 3
+0613	ok	SELECT 1 - 2 >> 3
+0614	ok	SELECT 1 - 2 + 3
+0615	ok	SELECT 1 - 2 - 3
+0616	ok	SELECT 1 - 2 * 3
+0617	ok	SELECT 1 - 2 / 3
+0618	ok	SELECT 1 - 2 % 3
+0619	ok	SELECT 1 - 2 || 3
+0620	ok	SELECT 1 * 2 OR 3
+0621	ok	SELECT 1 * 2 AND 3
+0622	ok	SELECT 1 * 2 = 3
+0623	ok	SELECT 1 * 2 == 3
+0624	ok	SELECT 1 * 2 != 3
+0625	ok	SELECT 1 * 2 <> 3
+0626	ok	SELECT 1 * 2 IS 3
+0627	ok	SELECT 1 * 2 IS NOT 3
+0628	ok	SELECT 1 * 2 IS DISTINCT FROM 3
+0629	ok	SELECT 1 * 2 < 3
+0630	ok	SELECT 1 * 2 <= 3
+0631	ok	SELECT 1 * 2 > 3
+0632	ok	SELECT 1 * 2 >= 3
+0633	ok	SELECT 1 * 2 & 3
+0634	ok	SELECT 1 * 2 | 3
+0635	ok	SELECT 1 * 2 << 3
+0636	ok	SELECT 1 * 2 >> 3
+0637	ok	SELECT 1 * 2 + 3
+0638	ok	SELECT 1 * 2 - 3
+0639	ok	SELECT 1 * 2 * 3
+0640	ok	SELECT 1 * 2 / 3
+0641	ok	SELECT 1 * 2 % 3
+0642	ok	SELECT 1 * 2 || 3
+0643	ok	SELECT 1 / 2 OR 3
+0644	ok	SELECT 1 / 2 AND 3
+0645	ok	SELECT 1 / 2 = 3
+0646	ok	SELECT 1 / 2 == 3
+0647	ok	SELECT 1 / 2 != 3
+0648	ok	SELECT 1 / 2 <> 3
+0649	ok	SELECT 1 / 2 IS 3
+0650	ok	SELECT 1 / 2 IS NOT 3
+0651	ok	SELECT 1 / 2 IS DISTINCT FROM 3
+0652	ok	SELECT 1 / 2 < 3
+0653	ok	SELECT 1 / 2 <= 3
+0654	ok	SELECT 1 / 2 > 3
+0655	ok	SELECT 1 / 2 >= 3
+0656	ok	SELECT 1 / 2 & 3
+0657	ok	SELECT 1 / 2 | 3
+0658	ok	SELECT 1 / 2 << 3
+0659	ok	SELECT 1 / 2 >> 3
+0660	ok	SELECT 1 / 2 + 3
+0661	ok	SELECT 1 / 2 - 3
+0662	ok	SELECT 1 / 2 * 3
+0663	ok	SELECT 1 / 2 / 3
+0664	ok	SELECT 1 / 2 % 3
+0665	ok	SELECT 1 / 2 || 3
+0666	ok	SELECT 1 % 2 OR 3
+0667	ok	SELECT 1 % 2 AND 3
+0668	ok	SELECT 1 % 2 = 3
+0669	ok	SELECT 1 % 2 == 3
+0670	ok	SELECT 1 % 2 != 3
+0671	ok	SELECT 1 % 2 <> 3
+0672	ok	SELECT 1 % 2 IS 3
+0673	ok	SELECT 1 % 2 IS NOT 3
+0674	ok	SELECT 1 % 2 IS DISTINCT FROM 3
+0675	ok	SELECT 1 % 2 < 3
+0676	ok	SELECT 1 % 2 <= 3
+0677	ok	SELECT 1 % 2 > 3
+0678	ok	SELECT 1 % 2 >= 3
+0679	ok	SELECT 1 % 2 & 3
+0680	ok	SELECT 1 % 2 | 3
+0681	ok	SELECT 1 % 2 << 3
+0682	ok	SELECT 1 % 2 >> 3
+0683	ok	SELECT 1 % 2 + 3
+0684	ok	SELECT 1 % 2 - 3
+0685	ok	SELECT 1 % 2 * 3
+0686	ok	SELECT 1 % 2 / 3
+0687	ok	SELECT 1 % 2 % 3
+0688	ok	SELECT 1 % 2 || 3
+0689	ok	SELECT 1 || 2 OR 3
+0690	ok	SELECT 1 || 2 AND 3
+0691	ok	SELECT 1 || 2 = 3
+0692	ok	SELECT 1 || 2 == 3
+0693	ok	SELECT 1 || 2 != 3
+0694	ok	SELECT 1 || 2 <> 3
+0695	ok	SELECT 1 || 2 IS 3
+0696	ok	SELECT 1 || 2 IS NOT 3
+0697	ok	SELECT 1 || 2 IS DISTINCT FROM 3
+0698	ok	SELECT 1 || 2 < 3
+0699	ok	SELECT 1 || 2 <= 3
+0700	ok	SELECT 1 || 2 > 3
+0701	ok	SELECT 1 || 2 >= 3
+0702	ok	SELECT 1 || 2 & 3
+0703	ok	SELECT 1 || 2 | 3
+0704	ok	SELECT 1 || 2 << 3
+0705	ok	SELECT 1 || 2 >> 3
+0706	ok	SELECT 1 || 2 + 3
+0707	ok	SELECT 1 || 2 - 3
+0708	ok	SELECT 1 || 2 * 3
+0709	ok	SELECT 1 || 2 / 3
+0710	ok	SELECT 1 || 2 % 3
+0711	ok	SELECT 1 || 2 || 3
+0712	ok	SELECT CASE WHEN 1 THEN 'yes' ELSE 'no' END
+0713	ok	SELECT CAST(1 AS TEXT)
+0714	ok	SELECT count(DISTINCT name) FROM peers
+0715	ok	SELECT EXISTS(SELECT 1 FROM peers)
+0716	ok	SELECT id FROM peers WHERE id IN (SELECT id FROM peers)
+0717	ok	SELECT 1 BETWEEN 0 AND 2
+0718	ok	SELECT 'abc' LIKE 'a%' ESCAPE '\\'
+0719	ok	SELECT 1 ISNULL, 1 NOTNULL, 1 NOT NULL
+0720	ok	SELECT -1 COLLATE binary
+0721	ok	SELECT * FROM (SELECT * FROM peers) AS p LEFT JOIN accounts a ON p.account_id=a.id
+0722	ok	BEGIN IMMEDIATE
+0723	ok	COMMIT
+0724	ok	ROLLBACK
+0725	ok	PRAGMA busy_timeout=30000
+0726	ok	PRAGMA defer_foreign_keys=ON
+0727	ok	CREATE TABLE t(a TEXT, b INTEGER DEFAULT 1, PRIMARY KEY(a), CONSTRAINT fk FOREIGN KEY(a) REFERENCES accounts(id) ON DELETE CASCADE)
+0728	ok	CREATE UNIQUE INDEX IF NOT EXISTS idx ON peers(name,account_id)
+0729	ok	ALTER TABLE peers ADD COLUMN x TEXT
+0730	ok	ALTER TABLE peers RENAME COLUMN name TO label
+0731	ok	ALTER TABLE peers RENAME TO p
+0732	ok	ALTER TABLE peers DROP COLUMN name
+0733	ok	DROP TABLE IF EXISTS t
+0734	ok	DROP INDEX IF EXISTS idx
+0735	ok	CREATE VIEW v AS SELECT * FROM peers
+0736	ok	CREATE TRIGGER tr AFTER INSERT ON peers BEGIN SELECT 1; END
+0737	ok	INSERT INTO peers(id) VALUES(?) ON CONFLICT(id) DO NOTHING RETURNING id
+0738	ok	INSERT INTO peers(id,name) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name RETURNING *
+0739	ok	UPDATE peers SET name=? WHERE id=? RETURNING *
+0740	ok	DELETE FROM peers WHERE id=? RETURNING id
+0741	unsupported-by-lane	SELECT 1 UNION ALL SELECT 2
+0742	unsupported-by-lane	WITH x AS (SELECT 1) SELECT * FROM x
+0743	unsupported-by-lane	SELECT row_number() OVER ()
+0744	unsupported-by-lane	CREATE TABLE gen(a INT,b INT GENERATED ALWAYS AS(a+1))
+0745	semantic	SELECT key FROM peers
+0746	semantic	SELECT action FROM peers
+0747	semantic	SELECT abort FROM peers
+0748	semantic	SELECT after FROM peers
+0749	semantic	SELECT analyze FROM peers
+0750	semantic	SELECT asc FROM peers
+0751	semantic	SELECT attach FROM peers
+0752	semantic	SELECT before FROM peers
+0753	semantic	SELECT cascade FROM peers
+0754	syntax	SELECT cast FROM peers
+0755	semantic	SELECT conflict FROM peers
+0756	semantic	SELECT database FROM peers
+0757	semantic	SELECT deferred FROM peers
+0758	semantic	SELECT desc FROM peers
+0759	semantic	SELECT detach FROM peers
+0760	semantic	SELECT each FROM peers
+0761	semantic	SELECT end FROM peers
+0762	semantic	SELECT exclusive FROM peers
+0763	semantic	SELECT explain FROM peers
+0764	semantic	SELECT fail FROM peers
+0765	semantic	SELECT for FROM peers
+0766	semantic	SELECT ignore FROM peers
+0767	semantic	SELECT immediate FROM peers
+0768	semantic	SELECT initially FROM peers
+0769	semantic	SELECT instead FROM peers
+0770	semantic	SELECT like FROM peers
+0771	semantic	SELECT match FROM peers
+0772	semantic	SELECT no FROM peers
+0773	semantic	SELECT plan FROM peers
+0774	semantic	SELECT query FROM peers
+0775	syntax	SELECT raise FROM peers
+0776	semantic	SELECT recursive FROM peers
+0777	semantic	SELECT release FROM peers
+0778	semantic	SELECT replace FROM peers
+0779	semantic	SELECT restrict FROM peers
+0780	semantic	SELECT rollback FROM peers
+0781	semantic	SELECT row FROM peers
+0782	semantic	SELECT rows FROM peers
+0783	semantic	SELECT savepoint FROM peers
+0784	semantic	SELECT temp FROM peers
+0785	semantic	SELECT temporary FROM peers
+0786	semantic	SELECT trigger FROM peers
+0787	semantic	SELECT vacuum FROM peers
+0788	semantic	SELECT view FROM peers
+0789	semantic	SELECT virtual FROM peers
+0790	semantic	SELECT with FROM peers
+0791	semantic	SELECT without FROM peers
+0792	syntax	SELECT FROM
+0793	syntax	SELECT (
+0794	syntax	SELECT 1 +
+0795	syntax	SELECT 1e
+0796	syntax	SELECT 0x
+0797	syntax	SELECT 1.2.3
+0798	syntax	SELECT 'oops
+0799	syntax	SELECT "oops
+0800	syntax	SELECT [oops
+0801	syntax	SELECT x'1'
+0802	syntax	SELECT x'gg'
+0803	syntax	INSERT INTO peers VALUES
+0804	syntax	INSERT peers VALUES(1)
+0805	syntax	UPDATE peers SET
+0806	syntax	DELETE peers
+0807	syntax	CREATE TABLE
+0808	syntax	CREATE TABLE t(a,,b)
+0809	syntax	SELECT 1 ** 2
+0810	syntax	SELECT 1 @
+0811	syntax	SELECT )
+0812	syntax	SELECT ,1
+0813	syntax	SELECT 1 WHERE
+0814	syntax	SELECT 1 ORDER BY
+0815	syntax	SELECT 1 LIMIT
+0816	syntax	DROP
+0817	syntax	ALTER TABLE peers
+0818	syntax	SELECT 1 ! 2
+0819	syntax	SELECT FROM 
+0820	syntax	SELECT ( 
+0821	syntax	SELECT 1 + 
+0822	syntax	SELECT 1e 
+0823	syntax	SELECT 0x 
+0824	syntax	SELECT 1.2.3 
+0825	syntax	SELECT 'oops 
+0826	syntax	SELECT "oops 
+0827	syntax	SELECT [oops 
+0828	syntax	SELECT x'1' 
+0829	syntax	SELECT x'gg' 
+0830	syntax	INSERT INTO peers VALUES 
+0831	syntax	INSERT peers VALUES(1) 
+0832	syntax	UPDATE peers SET 
+0833	syntax	DELETE peers 
+0834	syntax	CREATE TABLE 
+0835	syntax	CREATE TABLE t(a,,b) 
+0836	syntax	SELECT 1 ** 2 
+0837	syntax	SELECT 1 @ 
+0838	syntax	SELECT ) 
+0839	syntax	SELECT ,1 
+0840	syntax	SELECT 1 WHERE 
+0841	syntax	SELECT 1 ORDER BY 
+0842	syntax	SELECT 1 LIMIT 
+0843	syntax	DROP 
+0844	syntax	ALTER TABLE peers 
+0845	syntax	SELECT 1 ! 2 
+0846	syntax	SELECT FROM  
+0847	syntax	SELECT (  
+0848	syntax	SELECT 1 +  
+0849	syntax	SELECT 1e  
+0850	syntax	SELECT 0x  
+0851	syntax	SELECT 1.2.3  
+0852	syntax	SELECT 'oops  
+0853	syntax	SELECT "oops  
+0854	syntax	SELECT [oops  
+0855	syntax	SELECT x'1'  
+0856	syntax	SELECT x'gg'  
+0857	syntax	INSERT INTO peers VALUES  
+0858	syntax	INSERT peers VALUES(1)  
+0859	syntax	UPDATE peers SET  
+0860	syntax	DELETE peers  
+0861	syntax	CREATE TABLE  
+0862	syntax	CREATE TABLE t(a,,b)  
+0863	syntax	SELECT 1 ** 2  
+0864	syntax	SELECT 1 @  
+0865	syntax	SELECT )  
+0866	syntax	SELECT ,1  
+0867	syntax	SELECT 1 WHERE  
+0868	syntax	SELECT 1 ORDER BY  
+0869	syntax	SELECT 1 LIMIT  
+0870	syntax	DROP  
+0871	syntax	ALTER TABLE peers  
+0872	syntax	SELECT 1 ! 2  
+0873	syntax	SELECT FROM   
+0874	syntax	SELECT (   
+0875	syntax	SELECT 1 +   
+0876	syntax	SELECT 1e   
+0877	syntax	SELECT 0x   
+0878	syntax	SELECT 1.2.3   
+0879	syntax	SELECT 'oops   
+0880	syntax	SELECT "oops   
+0881	syntax	SELECT [oops   
+0882	syntax	SELECT x'1'   
+0883	syntax	SELECT x'gg'   
+0884	syntax	INSERT INTO peers VALUES   
+0885	syntax	INSERT peers VALUES(1)   
+0886	syntax	UPDATE peers SET   
+0887	syntax	DELETE peers   
+0888	syntax	CREATE TABLE   
+0889	syntax	CREATE TABLE t(a,,b)   
+0890	syntax	SELECT 1 ** 2   
+0891	syntax	SELECT 1 @   
+0892	syntax	SELECT )   
+0893	syntax	SELECT ,1   
+0894	syntax	SELECT 1 WHERE   
+0895	syntax	SELECT 1 ORDER BY   
+0896	syntax	SELECT 1 LIMIT   
+0897	syntax	DROP   
+0898	syntax	ALTER TABLE peers   
+0899	syntax	SELECT 1 ! 2   
+0900	ok	SELECT .5
+0901	ok	SELECT 5.
+0902	ok	SELECT 1e+10
+0903	ok	SELECT 0xFF
+0904	syntax	SELECT 0x
+0905	ok	SELECT 1_000
+0906	ok	SELECT 'a\nb'
+0907	ok	SELECT 1 -- eof
+0908	ok	SELECT 1 /* nested /* looking */
+0909	ok	SELECT 1 /* unterminated
+0910	ok	SELECT "a""b"
+0911	semantic	SELECT `a``b`
+0912	semantic	SELECT [a b]
+0913	semantic	SELECT café
+0914	ok	SELECT x''
+0915	ok	SELECT X'ABcd'
+0916	ok	SELECT ?1,?,:n,@n,$n,?
+0917	ok	SELECT 1\t+\n2
+0918	ok	SELECT NULL,TRUE,FALSE,CURRENT_TIMESTAMP
+0919	ok	SELECT ~1
+0920	ok	SELECT .5 
+0921	ok	SELECT 5. 
+0922	ok	SELECT 1e+10 
+0923	ok	SELECT 0xFF 
+0924	syntax	SELECT 0x 
+0925	ok	SELECT 1_000 
+0926	ok	SELECT 'a\nb' 
+0927	ok	SELECT 1 -- eof 
+0928	ok	SELECT 1 /* nested /* looking */ 
+0929	ok	SELECT 1 /* unterminated 
+0930	ok	SELECT "a""b" 
+0931	semantic	SELECT `a``b` 
+0932	semantic	SELECT [a b] 
+0933	semantic	SELECT café 
+0934	ok	SELECT x'' 
+0935	ok	SELECT X'ABcd' 
+0936	ok	SELECT ?1,?,:n,@n,$n,? 
+0937	ok	SELECT 1\t+\n2 
+0938	ok	SELECT NULL,TRUE,FALSE,CURRENT_TIMESTAMP 
+0939	ok	SELECT ~1 
+0940	ok	SELECT .5  
+0941	ok	SELECT 5.  
+0942	ok	SELECT 1e+10  
+0943	ok	SELECT 0xFF  
+0944	syntax	SELECT 0x  
+0945	ok	SELECT 1_000  
+0946	ok	SELECT 'a\nb'  
+0947	ok	SELECT 1 -- eof  
+0948	ok	SELECT 1 /* nested /* looking */  
+0949	ok	SELECT 1 /* unterminated  
+0950	ok	SELECT "a""b"  
+0951	semantic	SELECT `a``b`  
+0952	semantic	SELECT [a b]  
+0953	semantic	SELECT café  
+0954	ok	SELECT x''  
+0955	ok	SELECT X'ABcd'  
+0956	ok	SELECT ?1,?,:n,@n,$n,?  
+0957	ok	SELECT 1\t+\n2  
+0958	ok	SELECT NULL,TRUE,FALSE,CURRENT_TIMESTAMP  
+0959	ok	SELECT ~1  
