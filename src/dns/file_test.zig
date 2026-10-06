@@ -204,11 +204,11 @@ test "original modes survive recreation on apply and restore" {
         try fc.apply(&.{}, "100.100.111.1");
         var stat: [144]u8 align(8) = undefined;
         try testing.expectEqual(@as(usize, 0), linux.syscall4(.newfstatat, @bitCast(@as(isize, linux.AT.FDCWD)), @intFromPtr(tp.config.ptr), @intFromPtr(&stat), 0));
-        try testing.expectEqual(mode, std.mem.readInt(u32, stat[if (builtin.cpu.arch == .aarch64) 16 else 24 ..][0..4], .little) & 0o777);
+        try testing.expectEqual(mode, std.mem.readInt(u32, stat[if (builtin.cpu.arch == .aarch64) 16 else 24..][0..4], .little) & 0o777);
         _ = linux.unlink(tp.config.ptr);
         try fc.restore();
         try testing.expectEqual(@as(usize, 0), linux.syscall4(.newfstatat, @bitCast(@as(isize, linux.AT.FDCWD)), @intFromPtr(tp.config.ptr), @intFromPtr(&stat), 0));
-        try testing.expectEqual(mode, std.mem.readInt(u32, stat[if (builtin.cpu.arch == .aarch64) 16 else 24 ..][0..4], .little) & 0o777);
+        try testing.expectEqual(mode, std.mem.readInt(u32, stat[if (builtin.cpu.arch == .aarch64) 16 else 24..][0..4], .little) & 0o777);
     }
 }
 
@@ -288,4 +288,435 @@ test "repair watcher external write stop and allocator cleanup" {
     const raw = try file.readFileAlloc(testing.allocator, tp.config.ptr);
     defer testing.allocator.free(raw);
     try testing.expectEqualStrings("nameserver 9.9.9.9\n", raw);
+}
+
+const h = struct {
+    pub fn failed(rc: usize) bool {
+        return rc > 0xfffffffffffff000;
+    }
+    pub fn ok(rc: usize) !void {
+        try testing.expect(!@This().failed(rc));
+    }
+    pub const Paths = struct {
+        dir: [:0]u8,
+        config: [:0]u8,
+        backup: [:0]u8,
+        state: [:0]u8,
+        recovery: [:0]u8,
+        pub fn init(a: std.mem.Allocator, label: []const u8) !Paths {
+            const dir = try std.fmt.allocPrintSentinel(a, "/tmp/r49-{s}-{d}", .{ label, linux.getpid() }, 0);
+            try ok(linux.mkdir(dir.ptr, 0o700));
+            return .{ .dir = dir, .config = try std.fmt.allocPrintSentinel(a, "{s}/resolv.conf", .{dir}, 0), .backup = try std.fmt.allocPrintSentinel(a, "{s}/resolv.conf.original.netbird", .{dir}, 0), .state = try std.fmt.allocPrintSentinel(a, "{s}/dns_state", .{dir}, 0), .recovery = try std.fmt.allocPrintSentinel(a, "{s}/recovery", .{dir}, 0) };
+        }
+        pub fn cleanup(p: Paths) void {
+            _ = linux.unlink(p.config.ptr);
+            _ = linux.unlink(p.backup.ptr);
+            _ = linux.unlink(p.state.ptr);
+            _ = linux.unlink(p.recovery.ptr);
+            _ = linux.rmdir(p.dir.ptr);
+        }
+        pub fn fc(p: Paths, a: std.mem.Allocator) file.FileConfigurator {
+            return .{ .alloc = a, .config_path = p.config, .backup_path = p.backup };
+        }
+    };
+    pub fn write(path: [*:0]const u8, data: []const u8) !void {
+        const raw = linux.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o600);
+        try ok(raw);
+        const fd: linux.fd_t = @intCast(raw);
+        defer _ = linux.close(fd);
+        try testing.expectEqual(data.len, linux.write(fd, data.ptr, data.len));
+    }
+    pub fn contents(path: [*:0]const u8, expected: []const u8) !void {
+        const raw = try file.readFileAlloc(testing.allocator, path);
+        defer testing.allocator.free(raw);
+        try testing.expectEqualStrings(expected, raw);
+    }
+    pub fn delay() void {
+        var ts = linux.timespec{ .sec = 0, .nsec = 10_000_000 };
+        _ = linux.nanosleep(&ts, null);
+    }
+    pub fn repaired(path: [*:0]const u8, server: []const u8, domain: []const u8) !void {
+        for (0..100) |_| {
+            delay();
+            const raw = file.readFileAlloc(testing.allocator, path) catch continue;
+            defer testing.allocator.free(raw);
+            if (std.mem.indexOf(u8, raw, server) != null and std.mem.indexOf(u8, raw, domain) != null) return;
+        }
+        const raw = try file.readFileAlloc(testing.allocator, path);
+        defer testing.allocator.free(raw);
+        std.debug.print("REPAIR_TIMEOUT final={s}\n", .{raw});
+        return error.ExpectedRepair;
+    }
+};
+
+test "R49 existing destination mode and owner retained through apply and restore" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const p = try h.Paths.init(a, "mode-owner");
+    defer p.cleanup();
+    try h.write(p.config.ptr, "nameserver 8.8.8.8\n");
+    const fd_raw = linux.open(p.config.ptr, .{ .ACCMODE = .RDONLY }, 0);
+    try h.ok(fd_raw);
+    const fd: linux.fd_t = @intCast(fd_raw);
+    defer _ = linux.close(fd);
+    try h.ok(linux.fchmod(fd, 0o640));
+    var before: [144]u8 align(8) = undefined;
+    try h.ok(linux.syscall4(.newfstatat, @bitCast(@as(isize, linux.AT.FDCWD)), @intFromPtr(p.config.ptr), @intFromPtr(&before), 0));
+    var fc = p.fc(a);
+    try fc.backup();
+    try t.expectEqual(@as(u32, 0o640), try file.fileMode(p.backup.ptr));
+    try h.ok(linux.fchmod(fd, 0o600));
+    try fc.apply(&.{}, "100.100.111.1");
+    try t.expectEqual(@as(u32, 0o600), try file.fileMode(p.config.ptr));
+    try fc.restoreHostDNS();
+    try t.expectEqual(@as(u32, 0o600), try file.fileMode(p.config.ptr));
+    var after: [144]u8 align(8) = undefined;
+    try h.ok(linux.syscall4(.newfstatat, @bitCast(@as(isize, linux.AT.FDCWD)), @intFromPtr(p.config.ptr), @intFromPtr(&after), 0));
+    // Native review is x86_64: st_uid/st_gid follow st_mode at offsets 28/32.
+    try t.expectEqualSlices(u8, before[28..36], after[28..36]);
+    try t.expectError(error.OpenFailed, fc.restoreHostDNS());
+}
+
+test "R49 backup stat error and restore write error are propagated" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const p = try h.Paths.init(a, "file-errors");
+    defer p.cleanup();
+    var fc = p.fc(a);
+    try t.expectError(error.StatFailed, fc.backup());
+    try h.write(p.config.ptr, "nameserver 8.8.8.8\n");
+    try fc.backup();
+    try h.ok(linux.unlink(p.config.ptr));
+    try h.ok(linux.mkdir(p.config.ptr, 0o700));
+    defer _ = linux.rmdir(p.config.ptr);
+    try t.expectError(error.WriteFailed, fc.restoreHostDNS());
+    try t.expect(fc.backupExists());
+}
+
+test "R49 original PR88 long lived allocator apply restore cycle leak" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const p = try h.Paths.init(arena.allocator(), "apply-leak");
+    defer p.cleanup();
+    try h.write(p.config.ptr, "search original.example\noptions timeout:1\nnameserver 8.8.8.8\n");
+    var fc = p.fc(t.allocator);
+    try fc.backup();
+    try fc.apply(&.{"one.example"}, "100.100.111.1");
+    try fc.apply(&.{"two.example"}, "100.100.111.2");
+    try fc.restoreHostDNS();
+    std.debug.print("APPLY_CYCLES 2 restored=true configurator_has_deinit={}\n", .{@hasDecl(file.FileConfigurator, "deinit")});
+}
+
+fn applyWithAllocation(a: std.mem.Allocator, p: h.Paths) !void {
+    var fc = p.fc(a);
+    defer if (@hasDecl(file.FileConfigurator, "deinit")) fc.deinit();
+    try fc.apply(&.{"one.example"}, "100.100.111.1");
+}
+
+test "R49 apply allocation failure cleanup" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const p = try h.Paths.init(arena.allocator(), "apply-oom");
+    defer p.cleanup();
+    try h.write(p.backup.ptr, "nameserver 8.8.8.8\n");
+    try t.checkAllAllocationFailures(t.allocator, applyWithAllocation, .{p});
+}
+
+fn stateFc(p: h.Paths, a: std.mem.Allocator) file.FileConfigurator {
+    var fc = p.fc(a);
+    fc.state_path = p.state;
+    fc.recovery_path = p.recovery;
+    return fc;
+}
+
+test "R49 successful restart recovery consumes stale indicator" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const p = try h.Paths.init(arena.allocator(), "consume");
+    defer p.cleanup();
+    try h.write(p.config.ptr, probe_original);
+    var fc = stateFc(p, arena.allocator());
+    try fc.backup();
+    try fc.apply(&.{}, "100.100.111.1");
+    try t.expect(file.fileExists(p.state.ptr));
+    var restarted = stateFc(p, arena.allocator());
+    try restarted.restoreUncleanShutdownDNS();
+    try h.contents(p.config.ptr, probe_original);
+    std.debug.print("INDICATOR_AFTER_SUCCESS exists={}\n", .{file.fileExists(p.state.ptr)});
+    try t.expect(!file.fileExists(p.state.ptr));
+}
+
+test "R49 recovery compares IPv6 address value not presentation" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const p = try h.Paths.init(arena.allocator(), "ipv6");
+    defer p.cleanup();
+    try h.write(p.config.ptr, probe_original);
+    var fc = stateFc(p, arena.allocator());
+    try fc.backup();
+    try fc.apply(&.{}, "2001:db8::1");
+    try h.write(p.config.ptr, "nameserver 2001:0db8:0000:0000:0000:0000:0000:0001\n");
+    var restarted = stateFc(p, arena.allocator());
+    try restarted.restoreUncleanShutdownDNS();
+    try h.contents(p.config.ptr, probe_original);
+}
+
+test "R49 failed recovery preserves indicator and retry restores no nameserver file" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const p = try h.Paths.init(arena.allocator(), "retry");
+    defer p.cleanup();
+    try h.write(p.config.ptr, probe_original);
+    var fc = stateFc(p, arena.allocator());
+    try fc.backup();
+    try fc.apply(&.{}, "100.100.111.1");
+    try h.ok(linux.unlink(p.recovery.ptr));
+    var restarted = stateFc(p, arena.allocator());
+    try t.expectError(error.OpenFailed, restarted.restoreUncleanShutdownDNS());
+    try t.expect(file.fileExists(p.state.ptr));
+    try h.write(p.recovery.ptr, probe_original);
+    try h.write(p.config.ptr, "search external.example\n");
+    try restarted.restoreUncleanShutdownDNS();
+    try h.contents(p.config.ptr, probe_original);
+}
+
+test "R49 state is atomically replaced and old open handle remains complete" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const p = try h.Paths.init(arena.allocator(), "atomic");
+    defer p.cleanup();
+    try h.write(p.config.ptr, probe_original);
+    var fc = stateFc(p, arena.allocator());
+    try fc.backup();
+    try fc.apply(&.{}, "100.100.111.1");
+    const fd_raw = linux.open(p.state.ptr, .{ .ACCMODE = .RDONLY }, 0);
+    try h.ok(fd_raw);
+    const fd: linux.fd_t = @intCast(fd_raw);
+    defer _ = linux.close(fd);
+    const before = try file.readFileAlloc(t.allocator, p.state.ptr);
+    defer t.allocator.free(before);
+    try fc.apply(&.{}, "100.100.111.2");
+    var buf: [512]u8 = undefined;
+    const n = linux.read(fd, &buf, buf.len);
+    try h.ok(n);
+    std.debug.print("OLD_STATE_HANDLE before={s} after={s}\n", .{ before, buf[0..n] });
+    try t.expectEqualStrings(before, buf[0..n]);
+}
+
+test "R49 persisted state retains upstream typed DNS record" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const p = try h.Paths.init(arena.allocator(), "format");
+    defer p.cleanup();
+    try h.write(p.config.ptr, probe_original);
+    var fc = stateFc(p, arena.allocator());
+    try fc.backup();
+    try fc.apply(&.{}, "100.100.111.1");
+    const raw = try file.readFileAlloc(t.allocator, p.state.ptr);
+    defer t.allocator.free(raw);
+    std.debug.print("PERSISTED_STATE {s}\n", .{raw});
+    const value = try std.json.parseFromSlice(std.json.Value, t.allocator, raw, .{});
+    defer value.deinit();
+    const record = value.value.object.get("dns_state") orelse return error.MissingDnsState;
+    try t.expectEqual(@as(i64, 1), record.object.get("ManagerType").?.integer);
+    try t.expectEqualStrings("100.100.111.1", record.object.get("DNSAddress").?.string);
+}
+
+fn recoverWithAllocation(a: std.mem.Allocator, p: h.Paths) !void {
+    try h.write(p.state.ptr, "{\"dns_state\":{\"ManagerType\":1,\"DNSAddress\":\"100.100.111.1\",\"WgIface\":\"\"}}");
+    try h.write(p.config.ptr, "nameserver 100.100.111.1\n");
+    var fc = stateFc(p, a);
+    try fc.restoreUncleanShutdownDNS();
+    try h.contents(p.config.ptr, probe_original);
+}
+
+test "R49 recovery allocation failure releases temporary allocations" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const p = try h.Paths.init(arena.allocator(), "state-oom");
+    defer p.cleanup();
+    try h.write(p.state.ptr, "{\"dns_state\":{\"ManagerType\":1,\"DNSAddress\":\"100.100.111.1\",\"WgIface\":\"\"}}");
+    try h.write(p.recovery.ptr, probe_original);
+    try t.checkAllAllocationFailures(t.allocator, recoverWithAllocation, .{p});
+}
+
+fn startWithAllocation(a: std.mem.Allocator, p: h.Paths) !void {
+    var fc = p.fc(a);
+    fc.state_path = p.state;
+    fc.recovery_path = p.recovery;
+    fc.original_perms = 0o600;
+    const r = try file.Repair.start(a, &fc, &.{ "one.example", "two.example" }, probe_server);
+    r.stop();
+}
+
+test "R49 watcher start allocation failures and repeated start stop release resources" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const p = try h.Paths.init(arena.allocator(), "watch-oom");
+    defer p.cleanup();
+    try h.write(p.config.ptr, "search one.example two.example\nnameserver 100.100.111.1\n");
+    try t.checkAllAllocationFailures(t.allocator, startWithAllocation, .{p});
+    for (0..3) |_| try startWithAllocation(t.allocator, p);
+}
+
+test "R49 watcher failed directory watch releases owned allocations and fd" {
+    var fc = file.FileConfigurator{ .alloc = t.allocator, .config_path = "/tmp/r49-nonexistent-parent/resolv.conf", .backup_path = "/tmp/r49-nonexistent-parent/backup" };
+    try t.expectError(error.OpenFailed, file.Repair.start(t.allocator, &fc, probe_domains, probe_server));
+}
+
+test "R49 directory watcher handles rename replacement unrelated events and no self loop" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const p = try h.Paths.init(a, "rename");
+    defer p.cleanup();
+    try h.write(p.config.ptr, probe_original);
+    var fc = p.fc(a);
+    try fc.backup();
+    try fc.apply(probe_domains, probe_server);
+    const r = try file.Repair.start(t.allocator, &fc, probe_domains, probe_server);
+    defer r.stop();
+    const other = try std.fmt.allocPrintSentinel(a, "{s}/other", .{p.dir}, 0);
+    defer _ = linux.unlink(other.ptr);
+    const raw = try file.readFileAlloc(t.allocator, p.config.ptr);
+    defer t.allocator.free(raw);
+    try h.write(other.ptr, "irrelevant\n");
+    h.delay();
+    try h.contents(p.config.ptr, raw);
+    const replace = try std.fmt.allocPrintSentinel(a, "{s}/replacement", .{p.dir}, 0);
+    defer _ = linux.unlink(replace.ptr);
+    try h.write(replace.ptr, "search external.example\nnameserver 9.9.9.9\n");
+    try h.ok(linux.rename(replace.ptr, p.config.ptr));
+    try h.repaired(p.config.ptr, probe_server, "nb.example");
+    for (0..3) |_| {
+        try h.write(p.config.ptr, "search external.example\nnameserver 9.9.9.9\n");
+        try h.repaired(p.config.ptr, probe_server, "nb.example");
+    }
+    const final = try file.readFileAlloc(t.allocator, p.config.ptr);
+    defer t.allocator.free(final);
+    try t.expect(std.mem.indexOf(u8, final, "external.example") != null);
+    const writes_before = file.fileMode(p.config.ptr) catch 0;
+    for (0..10) |_| h.delay();
+    try h.contents(p.config.ptr, final);
+    try t.expectEqual(writes_before, try file.fileMode(p.config.ptr));
+}
+
+test "R49 watcher follows resolv.conf symlink target directory like upstream" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const p = try h.Paths.init(a, "symlink");
+    defer p.cleanup();
+    const dir = try std.fmt.allocPrintSentinel(a, "{s}/target-dir", .{p.dir}, 0);
+    try h.ok(linux.mkdir(dir.ptr, 0o700));
+    defer _ = linux.rmdir(dir.ptr);
+    const target = try std.fmt.allocPrintSentinel(a, "{s}/target.conf", .{dir}, 0);
+    defer _ = linux.unlink(target.ptr);
+    try h.write(target.ptr, probe_original);
+    try h.ok(linux.symlink(target.ptr, p.config.ptr));
+    var fc = p.fc(a);
+    try fc.backup();
+    try fc.apply(probe_domains, probe_server);
+    const r = try file.Repair.start(t.allocator, &fc, probe_domains, probe_server);
+    defer r.stop();
+    std.debug.print("WATCHED_DIRECTORY {s} EXPECTED {s}\n", .{ r.directory, dir });
+    try h.write(target.ptr, "search external.example\nnameserver 9.9.9.9\n");
+    try h.repaired(target.ptr, probe_server, "nb.example");
+}
+
+test "R49 repair write failure restores original instead of leaving partial managed DNS" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const p = try h.Paths.init(a, "repair-write-fail");
+    defer p.cleanup();
+    const original = "nameserver 8.8.8.8\n";
+    try h.write(p.config.ptr, original);
+    var fc = p.fc(a);
+    try fc.backup();
+    try fc.apply(&.{"nb.example"}, "100.100.111.1");
+    var limit: linux.rlimit = undefined;
+    try h.ok(linux.getrlimit(.FSIZE, &limit));
+    var previous: linux.Sigaction = undefined;
+    const ignore = linux.Sigaction{ .handler = .{ .handler = linux.SIG.IGN }, .mask = std.mem.zeroes(linux.sigset_t), .flags = 0 };
+    try h.ok(linux.sigaction(.XFSZ, &ignore, &previous));
+    defer _ = linux.sigaction(.XFSZ, &previous, null);
+    const reduced = linux.rlimit{ .cur = 128, .max = limit.max };
+    try h.ok(linux.setrlimit(.FSIZE, &reduced));
+    defer _ = linux.setrlimit(.FSIZE, &limit);
+    const watcher = try file.Repair.start(t.allocator, &fc, &.{"nb.example"}, "100.100.111.1");
+    var stopped = false;
+    defer if (!stopped) watcher.stop();
+    try h.write(p.config.ptr, "nameserver 9.9.9.9\n");
+    // Generated content exceeds 128 bytes, backup is 19 bytes and can be restored.
+    for (0..100) |_| {
+        h.delay();
+        const raw = try file.readFileAlloc(t.allocator, p.config.ptr);
+        defer t.allocator.free(raw);
+        if (raw.len == 128) break;
+    }
+    watcher.stop();
+    stopped = true;
+    const raw = try file.readFileAlloc(t.allocator, p.config.ptr);
+    defer t.allocator.free(raw);
+    try h.ok(linux.setrlimit(.FSIZE, &limit));
+    std.debug.print("REPAIR_FAILURE final_len={d} backup_exists={} contents={s}\n", .{ raw.len, fc.backupExists(), raw });
+    try t.expectEqualStrings(original, raw);
+}
+
+const t = testing;
+const probe_original = "nameserver 8.8.8.8\n";
+const probe_server = "100.100.111.1";
+const probe_domains = &.{"nb.example"};
+
+test "L52 shared raw members oracle malformed state and conditional consumption" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const p = try h.Paths.init(a, "shared");
+    defer p.cleanup();
+    try h.write(p.config.ptr, probe_original);
+    var fc = stateFc(p, a);
+    fc.wg_iface = "wt0";
+    try fc.backup();
+    try fc.apply(&.{}, probe_server);
+    try h.contents(p.state.ptr, "{\"dns_state\":{\"ManagerType\":1,\"DNSAddress\":\"100.100.111.1\",\"WgIface\":\"wt0\"}}");
+    const other = "{ \"precise\" : 123456789012345678901234567890, \"nested\" : [ 1, {\"x\":2} ] }";
+    const shared = try std.fmt.allocPrint(a, "{{\"other\":{s}}}", .{other});
+    try h.write(p.state.ptr, shared);
+    try fc.apply(&.{}, probe_server);
+    const raw = try file.readFileAlloc(a, p.state.ptr);
+    try t.expect(std.mem.indexOf(u8, raw, other) != null);
+    try h.write(p.config.ptr, "nameserver 9.9.9.9\n");
+    try fc.restoreUncleanShutdownDNS();
+    try h.contents(p.config.ptr, "nameserver 9.9.9.9\n");
+    try h.contents(p.state.ptr, try std.fmt.allocPrint(a, "{{\"other\":{s}}}", .{other}));
+    try h.write(p.state.ptr, "{broken");
+    try t.expectError(error.InvalidState, fc.restoreUncleanShutdownDNS());
+    try fc.apply(&.{}, probe_server); // upstream logs persistence errors after successful apply
+    try h.contents(p.state.ptr, "{broken");
+    try h.write(p.state.ptr, "");
+    try fc.restoreUncleanShutdownDNS();
+}
+
+test "L52 IPv4 mapped IPv6 recovery unmapped and shared clean restore" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const p = try h.Paths.init(a, "mapped");
+    defer p.cleanup();
+    try h.write(p.config.ptr, probe_original);
+    var fc = stateFc(p, a);
+    try fc.backup();
+    try fc.apply(&.{}, probe_server);
+    try h.write(p.config.ptr, "nameserver ::ffff:100.100.111.1\n");
+    try fc.restoreUncleanShutdownDNS();
+    try h.contents(p.config.ptr, probe_original);
+    try t.expect(!file.fileExists(p.state.ptr));
+    try h.write(p.state.ptr, "{\"other\": [ 3, 4 ]}");
+    try fc.apply(&.{}, probe_server);
+    try fc.restore();
+    try h.contents(p.state.ptr, "{\"other\":[ 3, 4 ]}");
 }

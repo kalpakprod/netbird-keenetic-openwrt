@@ -23,6 +23,7 @@ pub const Error = error{
     StatFailed,
     UnlinkFailed,
     EmptyFile,
+    InvalidState,
     OutOfMemory,
 };
 
@@ -187,7 +188,8 @@ pub fn fileExists(path: [*:0]const u8) bool {
 }
 
 /// Read a whole file (lseek for the size; no fstat on aarch64 4.9).
-pub fn readFileAlloc(alloc: std.mem.Allocator, path: [*:0]const u8) Error![]u8 {    const fd_usize = linux.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+pub fn readFileAlloc(alloc: std.mem.Allocator, path: [*:0]const u8) Error![]u8 {
+    const fd_usize = linux.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
     if (failed(fd_usize)) return Error.OpenFailed;
     const fd: linux.fd_t = @intCast(fd_usize);
     defer _ = linux.close(fd);
@@ -196,6 +198,7 @@ pub fn readFileAlloc(alloc: std.mem.Allocator, path: [*:0]const u8) Error![]u8 {
     if (failed(size)) return Error.StatFailed;
     _ = linux.lseek(fd, 0, linux.SEEK.SET); // rewind after sizing
     const buf = try alloc.alloc(u8, @intCast(size));
+    errdefer alloc.free(buf);
     var got: usize = 0;
     while (got < buf.len) {
         const n = linux.read(fd, buf[got..].ptr, buf.len - got);
@@ -209,8 +212,7 @@ pub fn readFileAlloc(alloc: std.mem.Allocator, path: [*:0]const u8) Error![]u8 {
 /// Kernel stat is 144 bytes on x86_64 and 128 bytes on aarch64.
 pub fn fileMode(path: [*:0]const u8) Error!u32 {
     var stat: [144]u8 align(8) = undefined;
-    const rc = linux.syscall4(.newfstatat,
-        @bitCast(@as(isize, linux.AT.FDCWD)), @intFromPtr(path), @intFromPtr(&stat), 0);
+    const rc = linux.syscall4(.newfstatat, @bitCast(@as(isize, linux.AT.FDCWD)), @intFromPtr(path), @intFromPtr(&stat), 0);
     if (failed(rc)) return Error.StatFailed;
     const offset = if (builtin.cpu.arch == .aarch64) 16 else 24;
     return std.mem.readInt(u32, stat[offset..][0..4], .little) & 0o7777;
@@ -248,6 +250,13 @@ pub const FileConfigurator = struct {
     recovery_path: ?[:0]const u8 = null,
     original_nameservers: []const []const u8 = &.{},
     original_perms: u32 = 0,
+    wg_iface: []const u8 = "",
+
+    pub fn deinit(f: *FileConfigurator) void {
+        for (f.original_nameservers) |ns| f.alloc.free(ns);
+        f.alloc.free(f.original_nameservers);
+        f.original_nameservers = &.{};
+    }
 
     pub fn backupExists(f: *const FileConfigurator) bool {
         return fileExists(f.backup_path.ptr);
@@ -264,9 +273,8 @@ pub const FileConfigurator = struct {
     pub fn restore(f: *FileConfigurator) Error!void {
         try copyFile(f.backup_path.ptr, f.config_path.ptr);
         if (failed(linux.unlink(f.backup_path.ptr))) return Error.UnlinkFailed;
-        if (f.state_path) |path| {
-            if (fileExists(path.ptr) and failed(linux.unlink(path.ptr))) return Error.UnlinkFailed;
-        }
+        f.deinit();
+        if (f.state_path) |path| try editState(f.alloc, path, null);
     }
 
     /// Port of applyDNSConfig/updateConfig: the caller must have backed the
@@ -280,25 +288,32 @@ pub const FileConfigurator = struct {
         nb_search_domains: []const []const u8,
         server_ip: []const u8,
     ) Error!void {
-        const raw = try readFileAlloc(f.alloc, f.backup_path.ptr);
-        defer f.alloc.free(raw);
-        // parse failure behaves like Go's: log-and-continue with empty state
-        const orig = parse(f.alloc, raw) catch ResolvConf{};
-
-        // keep the original nameservers past this call (Go keeps the parsed
-        // struct); the search domains and others are only used below
-        var duped_ns: std.ArrayListUnmanaged([]const u8) = .empty;
-        for (orig.name_servers) |ns| try duped_ns.append(f.alloc, try f.alloc.dupe(u8, ns));
-        f.original_nameservers = duped_ns.items;
-
-        const merged = try mergeSearchDomains(f.alloc, nb_search_domains, orig.search_domains);
-        const name_servers = [1][]const u8{server_ip};
-        const content = try prepareContent(f.alloc, f.backup_path, merged, &name_servers, orig.others);
-
+        var arena = std.heap.ArenaAllocator.init(f.alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const raw = try readFileAlloc(a, f.backup_path.ptr);
+        const orig = parse(a, raw) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => ResolvConf{},
+        };
+        const saved = try f.alloc.alloc([]const u8, orig.name_servers.len);
+        var count: usize = 0;
+        errdefer {
+            for (saved[0..count]) |ns| f.alloc.free(ns);
+            f.alloc.free(saved);
+        }
+        for (orig.name_servers, 0..) |ns, i| {
+            saved[i] = try f.alloc.dupe(u8, ns);
+            count += 1;
+        }
+        const merged = try mergeSearchDomains(a, nb_search_domains, orig.search_domains);
+        const content = try prepareContent(a, f.backup_path, merged, &.{server_ip}, orig.others);
         writeFile(f.config_path.ptr, content, f.original_perms) catch |err| {
             f.restore() catch {}; // Go logs the restore failure and returns the write error
             return err;
         };
+        f.deinit();
+        f.original_nameservers = saved;
         // Upstream logs indicator failures without failing a successful apply.
         f.recordShutdown(server_ip) catch {};
     }
@@ -310,7 +325,21 @@ pub const FileConfigurator = struct {
         const state = f.state_path orelse return;
         const recovery = f.recovery_path orelse return Error.OpenFailed;
         try copyFile(f.backup_path.ptr, recovery.ptr);
-        try writeFile(state.ptr, address, 0o600);
+        var arena = std.heap.ArenaAllocator.init(f.alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const ip = try normalizedAddress(address);
+        var ipbuf: [80]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&ipbuf);
+        switch (ip) {
+            .ip4 => |v| writer.print("{d}.{d}.{d}.{d}", .{ v.bytes[0], v.bytes[1], v.bytes[2], v.bytes[3] }) catch return Error.InvalidState,
+            .ip6 => |v| {
+                const u: std.Io.net.Ip6Address.Unresolved = .{ .bytes = v.bytes, .interface_name = null };
+                u.format(&writer) catch return Error.InvalidState;
+            },
+        }
+        const record = std.json.Stringify.valueAlloc(a, .{ .ManagerType = @as(u8, 1), .DNSAddress = writer.buffered(), .WgIface = f.wg_iface }, .{}) catch return Error.OutOfMemory;
+        try editState(a, state, record);
     }
 
     pub fn restoreUncleanShutdownDNS(f: *FileConfigurator) Error!void {
@@ -320,12 +349,22 @@ pub const FileConfigurator = struct {
         var arena = std.heap.ArenaAllocator.init(f.alloc);
         defer arena.deinit();
         const a = arena.allocator();
-        const address = try readFileAlloc(a, state.ptr);
+        const raw = try readFileAlloc(a, state.ptr);
+        if (raw.len == 0) return;
+        const members = try readMembers(a, raw);
+        var record: ?[]const u8 = null;
+        for (members) |m| if (std.mem.eql(u8, m.key, "dns_state")) {
+            record = m.value;
+        };
+        const bytes = record orelse return;
+        const parsed = std.json.parseFromSlice(struct { ManagerType: u8, DNSAddress: []const u8, WgIface: []const u8 }, a, bytes, .{ .ignore_unknown_fields = true }) catch return Error.InvalidState;
+        if (parsed.value.ManagerType != 1) return;
+        const address = try normalizedAddress(parsed.value.DNSAddress);
         const current = try parse(a, try readFileAlloc(a, f.config_path.ptr));
-        // Upstream checks the first nameserver, not byte identity or header.
-        if (current.name_servers.len == 0 or std.mem.eql(u8, current.name_servers[0], address)) {
+        if (current.name_servers.len == 0 or address.eql(&(try normalizedAddress(current.name_servers[0])))) {
             try copyFile(recovery.ptr, f.config_path.ptr);
         }
+        try editState(a, state, null);
     }
 
     /// Port of restoreHostDNS (without the repair watcher, M14+).
@@ -343,6 +382,7 @@ pub const Repair = struct {
     config: [:0]u8,
     backup: [:0]u8,
     directory: [:0]u8,
+    operation: [:0]u8,
     server: []u8,
     domains: [][]const u8,
     state: ?[:0]u8,
@@ -363,14 +403,22 @@ pub const Repair = struct {
         errdefer a.free(config);
         const backup = try a.dupeSentinel(u8, fc.backup_path, 0);
         errdefer a.free(backup);
-        const directory = try a.dupeSentinel(u8, std.fs.path.dirname(config) orelse ".", 0);
+        const operation = try resolvedPath(a, config);
+        errdefer a.free(operation);
+        const directory = try a.dupeSentinel(u8, std.fs.path.dirname(operation) orelse ".", 0);
         errdefer a.free(directory);
         const address = try a.dupe(u8, server);
         errdefer a.free(address);
         const copied = try a.alloc([]const u8, domains.len);
         var count: usize = 0;
-        errdefer { for (copied[0..count]) |d| a.free(d); a.free(copied); }
-        for (domains, 0..) |d, i| { copied[i] = try a.dupe(u8, d); count += 1; }
+        errdefer {
+            for (copied[0..count]) |d| a.free(d);
+            a.free(copied);
+        }
+        for (domains, 0..) |d, i| {
+            copied[i] = try a.dupe(u8, d);
+            count += 1;
+        }
         const state = if (fc.state_path) |p| try a.dupeSentinel(u8, p, 0) else null;
         errdefer if (state) |p| a.free(p);
         const recovery = if (fc.recovery_path) |p| try a.dupeSentinel(u8, p, 0) else null;
@@ -380,18 +428,22 @@ pub const Repair = struct {
         errdefer _ = linux.close(@intCast(fd));
         const wd = linux.inotify_add_watch(@intCast(fd), directory.ptr, mask);
         if (failed(wd)) return Error.OpenFailed;
-        r.* = .{ .alloc = a, .config = config, .backup = backup, .directory = directory, .server = address,
-            .domains = copied, .state = state, .recovery = recovery, .mode = fc.original_perms, .fd = @intCast(fd), .wd = @intCast(wd) };
+        r.* = .{ .alloc = a, .config = config, .backup = backup, .directory = directory, .operation = operation, .server = address, .domains = copied, .state = state, .recovery = recovery, .mode = fc.original_perms, .fd = @intCast(fd), .wd = @intCast(wd) };
         r.thread = try std.Thread.spawn(.{}, run, .{r});
         return r;
     }
 
+    /// Consumes and destroys this pointer. Stop once, before apply or restore.
     pub fn stop(r: *Repair) void {
         r.stopping.store(true, .release);
         if (r.thread) |t| t.join();
         _ = linux.close(r.fd);
         const a = r.alloc;
-        a.free(r.config); a.free(r.backup); a.free(r.directory); a.free(r.server);
+        a.free(r.operation);
+        a.free(r.config);
+        a.free(r.backup);
+        a.free(r.directory);
+        a.free(r.server);
         for (r.domains) |d| a.free(d);
         a.free(r.domains);
         if (r.state) |p| a.free(p);
@@ -414,7 +466,7 @@ pub const Repair = struct {
                 const len = std.mem.readInt(u32, events[offset + 12 ..][0..4], .little);
                 if (offset + 16 + len > n) break;
                 const name = std.mem.sliceTo(events[offset + 16 .. offset + 16 + len], 0);
-                if (bits & mask != 0 and std.mem.eql(u8, name, std.fs.path.basename(r.config))) relevant = true;
+                if (bits & mask != 0 and std.mem.eql(u8, name, std.fs.path.basename(r.operation))) relevant = true;
                 offset += 16 + len;
             }
             if (relevant) r.repair() catch {};
@@ -429,7 +481,10 @@ pub const Repair = struct {
         var missing = current.name_servers.len == 0 or !std.mem.eql(u8, current.name_servers[0], r.server);
         for (r.domains) |domain| {
             var found = false;
-            for (current.search_domains) |d| if (std.mem.eql(u8, domain, d)) { found = true; break; };
+            for (current.search_domains) |d| if (std.mem.eql(u8, domain, d)) {
+                found = true;
+                break;
+            };
             if (!found) missing = true;
         }
         if (!missing) return;
@@ -440,9 +495,115 @@ pub const Repair = struct {
         }
         const merged = try mergeSearchDomains(a, r.domains, current.search_domains);
         const content = try prepareContent(a, r.backup, merged, &.{r.server}, current.others);
-        try writeFile(r.config.ptr, content, r.mode);
-        var fc = FileConfigurator{ .alloc = a, .config_path = r.config, .backup_path = r.backup,
-            .state_path = r.state, .recovery_path = r.recovery };
+        writeFile(r.config.ptr, content, r.mode) catch |err| {
+            var rollback = FileConfigurator{ .alloc = a, .config_path = r.config, .backup_path = r.backup, .state_path = r.state };
+            rollback.restore() catch {};
+            return err;
+        };
+        var fc = FileConfigurator{ .alloc = a, .config_path = r.config, .backup_path = r.backup, .state_path = r.state, .recovery_path = r.recovery };
         fc.recordShutdown(r.server) catch {};
     }
 };
+
+fn normalizedAddress(text: []const u8) Error!std.Io.net.IpAddress {
+    const ip = std.Io.net.IpAddress.parse(text, 0) catch return Error.InvalidState;
+    if (ip == .ip6) {
+        const b = ip.ip6.bytes;
+        if (std.mem.eql(u8, b[0..12], &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255 })) return .{ .ip4 = .{ .bytes = b[12..16].*, .port = 0 } };
+    }
+    return ip;
+}
+
+fn resolvedPath(a: std.mem.Allocator, path: [:0]const u8) Error![:0]u8 {
+    const raw = linux.open(path.ptr, .{ .PATH = true, .CLOEXEC = true }, 0);
+    if (failed(raw)) return Error.OpenFailed;
+    defer _ = linux.close(@intCast(raw));
+    var linkbuf: [64]u8 = undefined;
+    const link = std.fmt.bufPrintSentinel(&linkbuf, "/proc/self/fd/{d}", .{raw}, 0) catch unreachable;
+    var buf: [4096]u8 = undefined;
+    const n = linux.readlink(link.ptr, &buf, buf.len);
+    if (failed(n) or n == buf.len) return Error.OpenFailed;
+    return a.dupeSentinel(u8, buf[0..n], 0);
+}
+
+const StateMember = struct { key: []const u8, raw_key: []const u8, value: []const u8 };
+
+/// Preserve raw JSON value bytes rather than round-tripping numbers or nested objects.
+fn readMembers(a: std.mem.Allocator, raw: []const u8) Error![]StateMember {
+    var scanner = std.json.Scanner.initCompleteInput(a, raw);
+    defer scanner.deinit();
+    if ((scanner.next() catch return Error.InvalidState) != .object_begin) return Error.InvalidState;
+    var members: std.ArrayList(StateMember) = .empty;
+    while (true) {
+        var key_start = scanner.cursor;
+        while (key_start < raw.len and (std.ascii.isWhitespace(raw[key_start]) or raw[key_start] == ',')) : (key_start += 1) {}
+        const token = scanner.nextAlloc(a, .alloc_always) catch |err| return if (err == error.OutOfMemory) Error.OutOfMemory else Error.InvalidState;
+        if (token == .object_end) break;
+        const key = switch (token) {
+            .allocated_string => |k| k,
+            .string => |k| k,
+            else => return Error.InvalidState,
+        };
+        const key_end = scanner.cursor;
+        var value_start = key_end;
+        while (value_start < raw.len and (std.ascii.isWhitespace(raw[value_start]) or raw[value_start] == ':')) : (value_start += 1) {}
+        scanner.skipValue() catch |err| return if (err == error.OutOfMemory) Error.OutOfMemory else Error.InvalidState;
+        var value_end = scanner.cursor;
+        while (value_end > value_start and std.ascii.isWhitespace(raw[value_end - 1])) : (value_end -= 1) {}
+        try members.append(a, .{ .key = key, .raw_key = raw[key_start..key_end], .value = raw[value_start..value_end] });
+    }
+    if ((scanner.next() catch return Error.InvalidState) != .end_of_document) return Error.InvalidState;
+    return members.items;
+}
+
+var state_sequence = std.atomic.Value(u64).init(0);
+fn atomicState(path: [:0]const u8, bytes: []const u8) Error!void {
+    var buf: [4096]u8 = undefined;
+    const tmp = std.fmt.bufPrintSentinel(&buf, "{s}.tmp-{d}-{d}", .{ path, linux.getpid(), state_sequence.fetchAdd(1, .monotonic) }, 0) catch return Error.WriteFailed;
+    const raw = linux.open(tmp.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true }, 0o600);
+    if (failed(raw)) return Error.WriteFailed;
+    const fd: linux.fd_t = @intCast(raw);
+    var closed = false;
+    defer {
+        if (!closed) _ = linux.close(fd);
+        _ = linux.unlink(tmp.ptr);
+    }
+    var sent: usize = 0;
+    while (sent < bytes.len) {
+        const n = linux.write(fd, bytes[sent..].ptr, bytes.len - sent);
+        if (failed(n) or n == 0) return Error.WriteFailed;
+        sent += n;
+    }
+    const rc = linux.close(fd);
+    closed = true;
+    if (failed(rc) or failed(linux.rename(tmp.ptr, path.ptr))) return Error.WriteFailed;
+}
+
+fn editState(alloc: std.mem.Allocator, path: [:0]const u8, record: ?[]const u8) Error!void {
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const raw = if (fileExists(path.ptr)) try readFileAlloc(a, path.ptr) else "";
+    const members = if (raw.len > 0) try readMembers(a, raw) else &.{};
+    var out: std.ArrayList(u8) = .empty;
+    try out.append(a, '{');
+    var count: usize = 0;
+    for (members) |m| {
+        if (std.mem.eql(u8, m.key, "dns_state")) continue;
+        if (count > 0) try out.append(a, ',');
+        try out.appendSlice(a, m.raw_key);
+        try out.append(a, ':');
+        try out.appendSlice(a, m.value);
+        count += 1;
+    }
+    if (record) |r| {
+        if (count > 0) try out.append(a, ',');
+        try out.appendSlice(a, "\"dns_state\":");
+        try out.appendSlice(a, r);
+        count += 1;
+    }
+    try out.append(a, '}');
+    if (count == 0) {
+        if (fileExists(path.ptr) and failed(linux.unlink(path.ptr))) return Error.UnlinkFailed;
+    } else try atomicState(path, out.items);
+}
